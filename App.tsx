@@ -1,94 +1,76 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { GameState, GameStatus, Player, NetworkMessage } from './types';
-import { useGameNetwork } from './services/comms';
-import { generateGameTopic } from './services/geminiService';
-import { Button } from './components/Button';
-import { Input } from './components/Input';
-import { Card } from './components/Card';
+import React, { useState, useCallback } from 'react';
+import { GameState, GameStatus, Player, NetworkMessage } from './types.ts';
+import { useGameNetwork } from './services/comms.ts';
+import { generateGameTopic } from './services/geminiService.ts';
+import { Button } from './components/Button.tsx';
+import { Input } from './components/Input.tsx';
+import { Card } from './components/Card.tsx';
 import { 
   Users, 
   Play, 
   RefreshCw, 
-  Eye, 
   EyeOff, 
   Crown, 
   AlertTriangle,
-  ArrowRight,
-  ShieldAlert
+  ShieldAlert,
+  Settings
 } from 'lucide-react';
 
-// Initial state helpers
 const generateRoomCode = () => Math.floor(100 + Math.random() * 900).toString();
 const generateId = () => Math.random().toString(36).substring(2, 9);
 
 const App: React.FC = () => {
-  // --- Local User State ---
   const [userId] = useState(generateId());
   const [userName, setUserName] = useState('');
   const [inputCode, setInputCode] = useState('');
-  
-  // --- Game State ---
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  
-  // --- UI State ---
   const [view, setView] = useState<'LANDING' | 'LOBBY' | 'GAME'>('LANDING');
   const [isRevealed, setIsRevealed] = useState(false);
 
-  // --- Network Handler ---
   const handleMessage = useCallback((msg: NetworkMessage) => {
-    if (!gameState && msg.type === 'STATE_UPDATE') {
-        // If we are looking for a game
-        // Logic: if we are in LANDING and just sent a join request, we accept this state
-        // However, for simplicity in this demo, if the room code matches input, we accept.
-        return; 
-    }
+    setGameState(current => {
+      if (!current) return current;
 
-    if (gameState) {
-      if (msg.type === 'JOIN_REQUEST' && gameState.players.some(p => p.isHost && p.id === userId)) {
-        // I am host, handle join request
-        if (msg.payload.roomCode === gameState.roomCode) {
+      if (msg.type === 'JOIN_REQUEST' && current.players.some(p => p.isHost && p.id === userId)) {
+        if (msg.payload.roomCode === current.roomCode) {
           const newPlayer: Player = {
             id: msg.payload.playerId,
             name: msg.payload.name,
             isHost: false
           };
-          
-          // Prevent duplicate joins
-          if (!gameState.players.find(p => p.id === newPlayer.id)) {
-             const newPlayers = [...gameState.players, newPlayer];
-             const newErrors = null;
-             
-             // Update my state
-             const newState = { ...gameState, players: newPlayers };
-             setGameState(newState);
-             // Broadcast new state to everyone
+          if (!current.players.find(p => p.id === newPlayer.id)) {
+             const newState = { ...current, players: [...current.players, newPlayer] };
              sendMessage({ type: 'STATE_UPDATE', payload: newState });
+             return newState;
           }
         }
       } else if (msg.type === 'STATE_UPDATE') {
-        // I am a client (or host receiving echo), update my state if room matches
-        if (msg.payload.roomCode === gameState.roomCode) {
-          // Merge state but keep my local ID perspective
-           setGameState(msg.payload);
-           if (msg.payload.status === 'PLAYING') setView('GAME');
-           if (msg.payload.status === 'LOBBY') setView('LOBBY');
+        if (msg.payload.roomCode === current.roomCode) {
+           if (msg.payload.status === GameStatus.PLAYING) setView('GAME');
+           if (msg.payload.status === GameStatus.LOBBY) setView('LOBBY');
+           return msg.payload;
         }
       } else if (msg.type === 'RESET_GAME') {
-          // Reset to lobby
-           setGameState(prev => prev ? ({ ...prev, status: GameStatus.LOBBY, roundData: undefined, players: prev.players.map(p => ({...p, role: undefined})) }) : null);
            setView('LOBBY');
+           setIsRevealed(false);
+           return { 
+             ...current, 
+             status: GameStatus.LOBBY, 
+             roundData: undefined, 
+             players: current.players.map(p => ({...p, role: undefined})) 
+           };
       }
-    }
-  }, [gameState, userId]);
+      return current;
+    });
+  }, [userId]);
 
   const { sendMessage } = useGameNetwork(handleMessage);
 
-  // --- Actions ---
-
   const createGame = () => {
-    if (!userName) return setError("Please enter your name");
+    if (!userName.trim()) return setError("Please enter your name");
+    setError(null);
     const code = generateRoomCode();
     const newGameState: GameState = {
       roomCode: code,
@@ -98,17 +80,12 @@ const App: React.FC = () => {
     };
     setGameState(newGameState);
     setView('LOBBY');
-    
-    // Announce existence (mainly for debug or reconnection, though not strictly needed for this simple flow)
     sendMessage({ type: 'STATE_UPDATE', payload: newGameState });
   };
 
   const joinGame = () => {
-    if (!userName || !inputCode) return setError("Name and Room Code are required");
-    // We optimistically enter a "Joining" state or wait for a response.
-    // For this simple P2P demo, we will listen for the specific game state.
-    
-    // We temporarily create a partial state to listen to updates
+    if (!userName.trim() || !inputCode.trim()) return setError("Name and Room Code are required");
+    setError(null);
     const tempState: GameState = {
         roomCode: inputCode,
         status: GameStatus.LOBBY,
@@ -116,28 +93,20 @@ const App: React.FC = () => {
         players: []
     };
     setGameState(tempState);
-    
     sendMessage({ 
       type: 'JOIN_REQUEST', 
       payload: { name: userName, roomCode: inputCode, playerId: userId } 
     });
-    
-    // In a real app we'd wait for ACK. Here we just switch view if we receive a STATE_UPDATE later.
-    // We'll show a loading screen or lobby immediately.
     setView('LOBBY');
   };
 
   const startGame = async () => {
     if (!gameState) return;
     setIsLoading(true);
-    
+    setError(null);
     try {
       const { category, topic } = await generateGameTopic();
-      
-      const playerCount = gameState.players.length;
       const impostorCount = gameState.settings.impostorCount;
-      
-      // Randomly assign roles
       const shuffledIds = [...gameState.players].map(p => p.id).sort(() => 0.5 - Math.random());
       const selectedImpostors = shuffledIds.slice(0, impostorCount);
       
@@ -156,9 +125,8 @@ const App: React.FC = () => {
       setGameState(newState);
       sendMessage({ type: 'STATE_UPDATE', payload: newState });
       setView('GAME');
-      
     } catch (e) {
-      setError("Failed to start game. Try again.");
+      setError("Failed to start game.");
     } finally {
       setIsLoading(false);
     }
@@ -167,76 +135,47 @@ const App: React.FC = () => {
   const resetGame = () => {
     if (!gameState) return;
     sendMessage({ type: 'RESET_GAME', payload: null });
-    // Host also resets locally
-    setGameState(prev => prev ? ({ ...prev, status: GameStatus.LOBBY, roundData: undefined, players: prev.players.map(p => ({...p, role: undefined})) }) : null);
+    setGameState(prev => prev ? ({ 
+      ...prev, 
+      status: GameStatus.LOBBY, 
+      roundData: undefined, 
+      players: prev.players.map(p => ({...p, role: undefined})) 
+    }) : null);
     setView('LOBBY');
+    setIsRevealed(false);
   };
 
-  // --- Derived State ---
   const me = gameState?.players.find(p => p.id === userId);
   const isHost = me?.isHost || false;
 
-  // --- Views ---
-
   if (view === 'LANDING') {
     return (
-      <div className="min-h-screen bg-slate-900 text-slate-100 font-sans flex items-center justify-center p-4">
-        <div className="max-w-md w-full space-y-8">
+      <div className="min-h-screen bg-slate-900 text-slate-100 flex items-center justify-center p-4">
+        <div className="max-w-md w-full space-y-8 animate-in fade-in duration-500">
           <div className="text-center space-y-2">
-            <h1 className="text-5xl font-black bg-gradient-to-br from-cyan-400 to-purple-600 bg-clip-text text-transparent">
-              IMPOSTOR
-            </h1>
-            <p className="text-slate-400">Can you blend in?</p>
-             <div className="inline-flex items-center gap-2 bg-slate-800/50 px-3 py-1 rounded-full text-xs text-slate-400 border border-slate-700/50">
-                <AlertTriangle className="w-3 h-3 text-amber-500" />
-                <span>Multi-tab support enabled (BroadcastChannel)</span>
-            </div>
+            <h1 className="text-6xl font-black bg-gradient-to-br from-cyan-400 via-purple-500 to-rose-500 bg-clip-text text-transparent tracking-tighter">IMPOSTOR</h1>
+            <p className="text-slate-400 font-medium">Multiplayer Social Deduction</p>
           </div>
-
           <Card>
             <div className="space-y-6">
-              <Input 
-                label="Your Name" 
-                placeholder="Enter nickname..." 
-                value={userName}
-                onChange={(e) => setUserName(e.target.value)}
-              />
-              
+              <Input label="Nickname" placeholder="What should we call you?" value={userName} onChange={(e) => setUserName(e.target.value)} />
               <div className="grid grid-cols-2 gap-4">
-                 {/* HOST TAB */}
-                 <div className="col-span-2 md:col-span-1 space-y-4">
-                    <div className="h-full flex flex-col justify-between">
-                        <Button onClick={createGame} className="w-full h-full min-h-[120px] flex-col gap-3">
-                            <Crown className="w-8 h-8" />
-                            <span>Host New Game</span>
-                        </Button>
-                    </div>
-                 </div>
-
-                 {/* JOIN TAB */}
-                 <div className="col-span-2 md:col-span-1 space-y-2">
-                     <div className="bg-slate-900/50 rounded-xl p-4 border border-slate-700 space-y-3">
-                        <Input 
-                            placeholder="3-digit Code" 
-                            className="text-center font-mono text-lg tracking-widest"
-                            maxLength={3}
-                            value={inputCode}
-                            onChange={(e) => setInputCode(e.target.value)}
-                        />
-                        <Button variant="secondary" onClick={joinGame} className="w-full">
-                            Join Game
-                        </Button>
-                     </div>
+                 <Button onClick={createGame} className="w-full flex-col py-6 gap-2">
+                    <Crown className="w-6 h-6" />
+                    <span>Host</span>
+                 </Button>
+                 <div className="space-y-2">
+                    <Input placeholder="Code" className="text-center font-mono" maxLength={3} value={inputCode} onChange={(e) => setInputCode(e.target.value)} />
+                    <Button variant="secondary" onClick={joinGame} className="w-full">Join</Button>
                  </div>
               </div>
             </div>
           </Card>
-          
-          {error && (
-            <div className="text-rose-400 text-center text-sm bg-rose-950/30 p-3 rounded-lg border border-rose-900">
-              {error}
-            </div>
-          )}
+          {error && <div className="text-rose-400 text-center text-sm bg-rose-950/30 p-3 rounded-xl border border-rose-900/50">{error}</div>}
+          <div className="flex justify-center gap-2 text-[10px] text-slate-500 uppercase tracking-widest font-bold">
+            <AlertTriangle className="w-3 h-3" /> 
+            <span>Open multiple tabs to play local-multiplayer</span>
+          </div>
         </div>
       </div>
     );
@@ -244,79 +183,56 @@ const App: React.FC = () => {
 
   if (view === 'LOBBY' && gameState) {
     return (
-      <div className="min-h-screen bg-slate-900 text-slate-100 p-4">
-        <div className="max-w-2xl mx-auto space-y-6">
-           {/* Header */}
-           <div className="flex items-center justify-between">
+      <div className="min-h-screen bg-slate-900 text-slate-100 p-6 flex flex-col items-center">
+        <div className="max-w-2xl w-full space-y-8 animate-in slide-in-from-bottom-4 duration-500">
+           <div className="flex items-end justify-between border-b border-slate-800 pb-6">
               <div>
-                  <h2 className="text-slate-400 text-sm font-bold uppercase tracking-wider">Room Code</h2>
-                  <div className="text-5xl font-mono font-black text-cyan-400 tracking-widest">{gameState.roomCode}</div>
+                  <h2 className="text-slate-500 text-xs font-black uppercase tracking-[0.2em]">Room Code</h2>
+                  <div className="text-6xl font-mono font-black text-cyan-400 leading-none">{gameState.roomCode}</div>
               </div>
               <div className="text-right">
-                  <div className="text-slate-400 text-sm">Players</div>
-                  <div className="text-2xl font-bold">{gameState.players.length}</div>
+                  <div className="text-slate-500 text-xs font-black uppercase tracking-[0.2em]">Players</div>
+                  <div className="text-4xl font-black text-slate-300 leading-none">{gameState.players.length}</div>
               </div>
            </div>
-
-           {/* Players List */}
-           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+           
+           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {gameState.players.map(player => (
-                  <div key={player.id} className="bg-slate-800 border border-slate-700 p-4 rounded-xl flex items-center gap-3">
-                      <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-lg ${player.isHost ? 'bg-amber-500 text-amber-950' : 'bg-slate-600'}`}>
+                  <div key={player.id} className="bg-slate-800/80 border border-slate-700 p-4 rounded-2xl flex items-center gap-4 shadow-lg">
+                      <div className={`w-12 h-12 rounded-xl flex items-center justify-center font-black text-xl shadow-inner ${player.isHost ? 'bg-amber-500 text-amber-950' : 'bg-slate-700 text-slate-300'}`}>
                           {player.name[0].toUpperCase()}
                       </div>
-                      <div className="overflow-hidden">
-                          <div className="font-bold truncate">{player.name}</div>
-                          {player.isHost && <div className="text-xs text-amber-500 flex items-center gap-1"><Crown className="w-3 h-3"/> Host</div>}
+                      <div className="flex-1 min-w-0">
+                          <div className="font-bold truncate text-lg">{player.name} {player.id === userId && <span className="text-cyan-500 font-normal text-xs">(You)</span>}</div>
+                          {player.isHost && <div className="text-xs text-amber-500 font-bold flex items-center gap-1 uppercase tracking-wider"><Crown className="w-3 h-3"/> Room Host</div>}
                       </div>
-                  </div>
-              ))}
-              {/* Empty slots placeholders */}
-              {Array.from({length: Math.max(0, 3 - gameState.players.length)}).map((_, i) => (
-                  <div key={i} className="border-2 border-dashed border-slate-800 rounded-xl p-4 flex items-center justify-center text-slate-700">
-                      Waiting...
                   </div>
               ))}
            </div>
 
-           {/* Host Controls */}
            {isHost ? (
-               <Card className="space-y-4 border-cyan-900/50 bg-cyan-950/10">
-                   <div className="flex items-center justify-between">
-                       <span className="font-bold text-slate-300">Number of Impostors</span>
-                       <div className="flex items-center gap-4 bg-slate-900 rounded-lg p-1">
-                           <button 
-                             onClick={() => {
-                                 const newCount = Math.max(1, gameState.settings.impostorCount - 1);
-                                 const newS = { ...gameState, settings: { ...gameState.settings, impostorCount: newCount } };
-                                 setGameState(newS);
-                                 sendMessage({ type: 'STATE_UPDATE', payload: newS });
-                             }}
-                             className="w-8 h-8 flex items-center justify-center hover:bg-slate-800 rounded font-bold text-slate-400"
-                           >-</button>
-                           <span className="font-mono w-4 text-center">{gameState.settings.impostorCount}</span>
-                           <button 
-                             onClick={() => {
-                                 const newCount = Math.min(gameState.players.length - 1, gameState.settings.impostorCount + 1);
-                                 const newS = { ...gameState, settings: { ...gameState.settings, impostorCount: newCount } };
-                                 setGameState(newS);
-                                 sendMessage({ type: 'STATE_UPDATE', payload: newS });
-                             }}
-                             className="w-8 h-8 flex items-center justify-center hover:bg-slate-800 rounded font-bold text-slate-400"
-                           >+</button>
+               <Card className="space-y-6 border-cyan-500/20 bg-cyan-500/5">
+                   <div className="flex items-center justify-between bg-slate-900/50 p-4 rounded-xl border border-slate-800">
+                       <div className="flex items-center gap-3">
+                         <div className="p-2 bg-cyan-500/10 rounded-lg"><Settings className="w-5 h-5 text-cyan-500" /></div>
+                         <span className="font-bold text-slate-200">Total Impostors</span>
+                       </div>
+                       <div className="flex items-center gap-6">
+                           <button onClick={() => setGameState({...gameState, settings: {impostorCount: Math.max(1, gameState.settings.impostorCount - 1)}})} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl">-</button>
+                           <span className="font-mono text-2xl font-black text-cyan-400">{gameState.settings.impostorCount}</span>
+                           <button onClick={() => setGameState({...gameState, settings: {impostorCount: Math.min(Math.max(1, gameState.players.length - 1), gameState.settings.impostorCount + 1)}})} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl">+</button>
                        </div>
                    </div>
-                   <Button onClick={startGame} isLoading={isLoading} disabled={gameState.players.length < 3} className="w-full">
-                        <Play className="w-5 h-5" /> Start Game
+                   <Button onClick={startGame} isLoading={isLoading} disabled={gameState.players.length < 3} size="lg" className="w-full">
+                        <Play className="w-5 h-5 fill-current" /> Start Game Session
                    </Button>
-                   {gameState.players.length < 3 && (
-                       <p className="text-center text-xs text-slate-500">Need at least 3 players to start.</p>
-                   )}
+                   {gameState.players.length < 3 && <p className="text-center text-xs text-slate-500 font-medium">Requires 3 or more players</p>}
                </Card>
            ) : (
-               <div className="text-center p-8 text-slate-500 animate-pulse">
-                   Waiting for host to start...
-               </div>
+             <div className="flex flex-col items-center gap-4 py-8">
+                <div className="w-8 h-8 border-4 border-cyan-500/20 border-t-cyan-500 rounded-full animate-spin" />
+                <p className="text-slate-500 font-bold uppercase tracking-widest text-xs">Waiting for host to start...</p>
+             </div>
            )}
         </div>
       </div>
@@ -325,83 +241,73 @@ const App: React.FC = () => {
 
   if (view === 'GAME' && gameState && me) {
       const isImpostor = me.role === 'impostor';
-      
       return (
-        <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
-            {/* Top Bar */}
-            <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/90 backdrop-blur sticky top-0 z-10">
-                <div className="flex items-center gap-2">
-                    <div className={`w-2 h-2 rounded-full ${isHost ? 'bg-amber-500' : 'bg-cyan-500'}`} />
-                    <span className="font-bold">{me.name}</span>
+        <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center">
+            <div className="w-full max-w-4xl p-4 flex justify-between items-center border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-20">
+                <div className="flex items-center gap-3 bg-slate-800/50 px-4 py-2 rounded-full border border-slate-700">
+                    <div className={`w-3 h-3 rounded-full animate-pulse ${isHost ? 'bg-amber-500' : 'bg-cyan-500'}`} />
+                    <span className="font-black text-sm tracking-tight">{me.name}</span>
                 </div>
-                {isHost && (
-                    <Button variant="ghost" size="sm" onClick={resetGame} className="text-xs px-2 py-1 h-auto">
-                        <RefreshCw className="w-3 h-3" /> End Game
-                    </Button>
-                )}
+                {isHost && <Button variant="danger" size="sm" onClick={resetGame} className="px-4"><RefreshCw className="w-4 h-4" /> End Round</Button>}
             </div>
 
-            {/* Main Content */}
-            <div className="flex-1 flex flex-col items-center justify-center p-6 space-y-8">
-                
-                <div className="text-center space-y-2">
-                    <h2 className="text-slate-400 uppercase tracking-widest text-sm font-bold">Category</h2>
-                    <p className="text-2xl font-bold text-cyan-400">{gameState.roundData?.category}</p>
+            <div className="flex-1 w-full max-w-lg flex flex-col items-center justify-center p-6 space-y-12 animate-in fade-in zoom-in duration-500">
+                <div className="text-center space-y-3">
+                    <h2 className="text-slate-500 uppercase tracking-[0.3em] text-xs font-black">Current Category</h2>
+                    <p className="text-4xl font-black text-cyan-400 drop-shadow-lg">{gameState.roundData?.category}</p>
                 </div>
 
-                <div className="w-full max-w-sm perspective-1000">
+                <div className="w-full aspect-[4/5] relative">
                     <button 
-                        onClick={() => setIsRevealed(!isRevealed)}
-                        className="w-full relative group transition-all duration-300 transform active:scale-95 focus:outline-none"
+                      onClick={() => setIsRevealed(!isRevealed)} 
+                      className="w-full h-full relative group focus:outline-none perspective-1000"
                     >
                         {isRevealed ? (
-                            <div className={`
-                                w-full aspect-[3/4] rounded-2xl p-8 flex flex-col items-center justify-center text-center gap-6 shadow-2xl border-2
-                                ${isImpostor 
-                                    ? 'bg-gradient-to-br from-rose-900 to-rose-950 border-rose-500 shadow-rose-900/20' 
-                                    : 'bg-gradient-to-br from-cyan-900 to-cyan-950 border-cyan-500 shadow-cyan-900/20'}
-                            `}>
+                            <div className={`w-full h-full rounded-[2.5rem] p-10 flex flex-col items-center justify-center text-center gap-8 shadow-2xl border-4 transition-all duration-500 ${isImpostor ? 'bg-gradient-to-br from-rose-900 via-rose-950 to-black border-rose-500 shadow-rose-900/50' : 'bg-gradient-to-br from-cyan-900 via-cyan-950 to-black border-cyan-500 shadow-cyan-900/50'}`}>
                                 {isImpostor ? (
                                     <>
-                                        <ShieldAlert className="w-20 h-20 text-rose-500 animate-pulse" />
-                                        <div>
-                                            <h3 className="text-3xl font-black text-rose-100 mb-2">IMPOSTOR</h3>
-                                            <p className="text-rose-200/70 text-sm">Blend in. Don't let them know you don't know.</p>
+                                        <div className="p-6 bg-rose-500/10 rounded-full animate-pulse"><ShieldAlert className="w-24 h-24 text-rose-500" /></div>
+                                        <div className="space-y-2">
+                                          <h3 className="text-5xl font-black text-rose-100 italic tracking-tighter">IMPOSTOR</h3>
+                                          <p className="text-rose-400 font-bold text-sm uppercase tracking-widest">You don't know the word!</p>
                                         </div>
                                     </>
                                 ) : (
                                     <>
-                                        <Users className="w-20 h-20 text-cyan-500" />
-                                        <div>
-                                            <h3 className="text-xl font-bold text-cyan-100 mb-4">SECRET WORD</h3>
-                                            <p className="text-4xl font-black text-white">{gameState.roundData?.topic}</p>
+                                        <div className="p-6 bg-cyan-500/10 rounded-full"><Users className="w-24 h-24 text-cyan-500" /></div>
+                                        <div className="space-y-2">
+                                          <h3 className="text-slate-400 font-bold text-xs uppercase tracking-[0.2em]">The Secret Word</h3>
+                                          <p className="text-5xl font-black text-white tracking-tight">{gameState.roundData?.topic}</p>
                                         </div>
-                                        <p className="text-cyan-200/70 text-sm mt-4">Find the impostor among you.</p>
                                     </>
                                 )}
-                                <div className="absolute bottom-6 flex items-center gap-2 text-xs uppercase tracking-widest opacity-50">
-                                    <EyeOff className="w-4 h-4" /> Tap to Hide
+                                <div className="absolute bottom-10 flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">
+                                    <EyeOff className="w-4 h-4" /> Tap to Hide Secret
                                 </div>
                             </div>
                         ) : (
-                            <div className="w-full aspect-[3/4] bg-slate-800 rounded-2xl border border-slate-700 flex flex-col items-center justify-center gap-4 shadow-xl group-hover:border-slate-600 transition-colors cursor-pointer">
-                                <div className="w-24 h-24 rounded-full bg-slate-900 flex items-center justify-center">
-                                    <span className="text-4xl">?</span>
+                            <div className="w-full h-full bg-slate-800 rounded-[2.5rem] border-4 border-slate-700 flex flex-col items-center justify-center gap-6 transition-all hover:border-slate-500 hover:bg-slate-700/80 shadow-2xl group">
+                                <div className="w-32 h-32 rounded-full bg-slate-900 flex items-center justify-center border-4 border-slate-800 shadow-inner group-hover:scale-110 transition-transform duration-300">
+                                    <span className="text-6xl font-black text-slate-700">?</span>
                                 </div>
-                                <p className="text-slate-400 font-bold uppercase tracking-widest">Tap to Reveal Role</p>
+                                <div className="text-center space-y-1">
+                                  <p className="text-slate-400 font-black uppercase tracking-[0.2em] text-sm">Tap to Reveal</p>
+                                  <p className="text-slate-600 text-[10px] uppercase font-bold">Keep it secret!</p>
+                                </div>
                             </div>
                         )}
                     </button>
                 </div>
-
-                <div className="text-center max-w-xs text-sm text-slate-500">
-                    {isHost ? "When you are ready to vote or start a new round, click 'End Game' at the top." : "Waiting for host to end the round."}
+                
+                <div className="bg-slate-800/30 px-6 py-4 rounded-2xl border border-slate-700/50 text-center text-xs font-medium text-slate-500 max-w-xs leading-relaxed">
+                    {isImpostor 
+                      ? "Fake it! Ask questions about the category without revealing you're the impostor." 
+                      : "Find the person who doesn't know the word. Don't be too obvious!"}
                 </div>
             </div>
         </div>
       );
   }
-
   return null;
 };
 

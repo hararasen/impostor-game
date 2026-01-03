@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { NetworkMessage } from '../types';
+import { NetworkMessage } from '../types.ts';
 
 const CHANNEL_NAME = 'impostor_game_channel_v1';
 
