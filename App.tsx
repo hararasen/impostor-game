@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { GameState, GameStatus, Player, NetworkMessage } from './types.ts';
 import { useGameNetwork } from './services/comms.ts';
 import { generateGameTopic } from './services/geminiService.ts';
@@ -29,44 +29,57 @@ const App: React.FC = () => {
   const [view, setView] = useState<'LANDING' | 'LOBBY' | 'GAME'>('LANDING');
   const [isRevealed, setIsRevealed] = useState(false);
 
-  const handleMessage = useCallback((msg: NetworkMessage) => {
-    setGameState(current => {
-      if (!current) return current;
+  // Check if current user is host
+  const me = gameState?.players.find(p => p.id === userId);
+  const isHost = me?.isHost || false;
 
-      if (msg.type === 'JOIN_REQUEST' && current.players.some(p => p.isHost && p.id === userId)) {
-        if (msg.payload.roomCode === current.roomCode) {
-          const newPlayer: Player = {
-            id: msg.payload.playerId,
-            name: msg.payload.name,
-            isHost: false
-          };
-          if (!current.players.find(p => p.id === newPlayer.id)) {
-             const newState = { ...current, players: [...current.players, newPlayer] };
-             sendMessage({ type: 'STATE_UPDATE', payload: newState });
-             return newState;
-          }
-        }
-      } else if (msg.type === 'STATE_UPDATE') {
-        if (msg.payload.roomCode === current.roomCode) {
-           if (msg.payload.status === GameStatus.PLAYING) setView('GAME');
-           if (msg.payload.status === GameStatus.LOBBY) setView('LOBBY');
-           return msg.payload;
-        }
-      } else if (msg.type === 'RESET_GAME') {
-           setView('LOBBY');
-           setIsRevealed(false);
-           return { 
-             ...current, 
-             status: GameStatus.LOBBY, 
-             roundData: undefined, 
-             players: current.players.map(p => ({...p, role: undefined})) 
-           };
+  const handleMessage = useCallback((msg: NetworkMessage) => {
+    if (msg.type === 'JOIN_REQUEST') {
+      // ONLY the host handles join requests
+      setGameState(current => {
+        if (!current || !isHost) return current;
+        if (msg.payload.roomCode !== current.roomCode) return current;
+        
+        // Don't add if already exists
+        if (current.players.some(p => p.id === msg.payload.playerId)) return current;
+
+        const newPlayer: Player = {
+          id: msg.payload.playerId,
+          name: msg.payload.name,
+          isHost: false
+        };
+        
+        return { ...current, players: [...current.players, newPlayer] };
+      });
+    } else if (msg.type === 'STATE_UPDATE') {
+      // Non-hosts adopt the state from the network if it matches their code
+      if (msg.payload.roomCode === (gameState?.roomCode || inputCode)) {
+        setGameState(msg.payload);
+        if (msg.payload.status === GameStatus.PLAYING) setView('GAME');
+        if (msg.payload.status === GameStatus.LOBBY) setView('LOBBY');
       }
-      return current;
-    });
-  }, [userId]);
+    } else if (msg.type === 'RESET_GAME') {
+      if (gameState && msg.payload === null) {
+        setView('LOBBY');
+        setIsRevealed(false);
+        setGameState(prev => prev ? ({ 
+          ...prev, 
+          status: GameStatus.LOBBY, 
+          roundData: undefined, 
+          players: prev.players.map(p => ({...p, role: undefined})) 
+        }) : null);
+      }
+    }
+  }, [userId, isHost, gameState?.roomCode, inputCode]);
 
   const { sendMessage } = useGameNetwork(handleMessage);
+
+  // Sync Effect: Host broadcasts their state whenever it changes locally
+  useEffect(() => {
+    if (isHost && gameState) {
+      sendMessage({ type: 'STATE_UPDATE', payload: gameState });
+    }
+  }, [gameState, isHost, sendMessage]);
 
   const createGame = () => {
     if (!userName.trim()) return setError("Please enter your name");
@@ -80,19 +93,11 @@ const App: React.FC = () => {
     };
     setGameState(newGameState);
     setView('LOBBY');
-    sendMessage({ type: 'STATE_UPDATE', payload: newGameState });
   };
 
   const joinGame = () => {
     if (!userName.trim() || !inputCode.trim()) return setError("Name and Room Code are required");
     setError(null);
-    const tempState: GameState = {
-        roomCode: inputCode,
-        status: GameStatus.LOBBY,
-        settings: { impostorCount: 1 },
-        players: []
-    };
-    setGameState(tempState);
     sendMessage({ 
       type: 'JOIN_REQUEST', 
       payload: { name: userName, roomCode: inputCode, playerId: userId } 
@@ -101,7 +106,7 @@ const App: React.FC = () => {
   };
 
   const startGame = async () => {
-    if (!gameState) return;
+    if (!gameState || !isHost) return;
     setIsLoading(true);
     setError(null);
     try {
@@ -115,15 +120,12 @@ const App: React.FC = () => {
         role: selectedImpostors.includes(p.id) ? 'impostor' : 'innocent'
       })) as Player[];
 
-      const newState: GameState = {
+      setGameState({
         ...gameState,
         status: GameStatus.PLAYING,
         players: updatedPlayers,
         roundData: { category, topic }
-      };
-
-      setGameState(newState);
-      sendMessage({ type: 'STATE_UPDATE', payload: newState });
+      });
       setView('GAME');
     } catch (e) {
       setError("Failed to start game.");
@@ -133,7 +135,7 @@ const App: React.FC = () => {
   };
 
   const resetGame = () => {
-    if (!gameState) return;
+    if (!gameState || !isHost) return;
     sendMessage({ type: 'RESET_GAME', payload: null });
     setGameState(prev => prev ? ({ 
       ...prev, 
@@ -144,9 +146,6 @@ const App: React.FC = () => {
     setView('LOBBY');
     setIsRevealed(false);
   };
-
-  const me = gameState?.players.find(p => p.id === userId);
-  const isHost = me?.isHost || false;
 
   if (view === 'LANDING') {
     return (
@@ -173,32 +172,32 @@ const App: React.FC = () => {
           </Card>
           {error && <div className="text-rose-400 text-center text-sm bg-rose-950/30 p-3 rounded-xl border border-rose-900/50">{error}</div>}
           <div className="flex justify-center gap-2 text-[10px] text-slate-500 uppercase tracking-widest font-bold">
-            <AlertTriangle className="w-3 h-3" /> 
-            <span>Open multiple tabs to play local-multiplayer</span>
+            <AlertTriangle className="w-3 h-3 text-amber-500" /> 
+            <span>Open multiple tabs to simulate multiple players</span>
           </div>
         </div>
       </div>
     );
   }
 
-  if (view === 'LOBBY' && gameState) {
+  if (view === 'LOBBY') {
     return (
       <div className="min-h-screen bg-slate-900 text-slate-100 p-6 flex flex-col items-center">
         <div className="max-w-2xl w-full space-y-8 animate-in slide-in-from-bottom-4 duration-500">
            <div className="flex items-end justify-between border-b border-slate-800 pb-6">
               <div>
                   <h2 className="text-slate-500 text-xs font-black uppercase tracking-[0.2em]">Room Code</h2>
-                  <div className="text-6xl font-mono font-black text-cyan-400 leading-none">{gameState.roomCode}</div>
+                  <div className="text-6xl font-mono font-black text-cyan-400 leading-none">{gameState?.roomCode || inputCode}</div>
               </div>
               <div className="text-right">
                   <div className="text-slate-500 text-xs font-black uppercase tracking-[0.2em]">Players</div>
-                  <div className="text-4xl font-black text-slate-300 leading-none">{gameState.players.length}</div>
+                  <div className="text-4xl font-black text-slate-300 leading-none">{gameState?.players.length || 0}</div>
               </div>
            </div>
            
            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {gameState.players.map(player => (
-                  <div key={player.id} className="bg-slate-800/80 border border-slate-700 p-4 rounded-2xl flex items-center gap-4 shadow-lg">
+              {gameState?.players.map(player => (
+                  <div key={player.id} className="bg-slate-800/80 border border-slate-700 p-4 rounded-2xl flex items-center gap-4 shadow-lg animate-in fade-in scale-95">
                       <div className={`w-12 h-12 rounded-xl flex items-center justify-center font-black text-xl shadow-inner ${player.isHost ? 'bg-amber-500 text-amber-950' : 'bg-slate-700 text-slate-300'}`}>
                           {player.name[0].toUpperCase()}
                       </div>
@@ -208,6 +207,11 @@ const App: React.FC = () => {
                       </div>
                   </div>
               ))}
+              {(!gameState || gameState.players.length === 0) && (
+                <div className="col-span-full py-12 text-center text-slate-500 font-bold uppercase tracking-widest text-sm animate-pulse">
+                  Requesting Entry...
+                </div>
+              )}
            </div>
 
            {isHost ? (
@@ -218,20 +222,20 @@ const App: React.FC = () => {
                          <span className="font-bold text-slate-200">Total Impostors</span>
                        </div>
                        <div className="flex items-center gap-6">
-                           <button onClick={() => setGameState({...gameState, settings: {impostorCount: Math.max(1, gameState.settings.impostorCount - 1)}})} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl">-</button>
-                           <span className="font-mono text-2xl font-black text-cyan-400">{gameState.settings.impostorCount}</span>
-                           <button onClick={() => setGameState({...gameState, settings: {impostorCount: Math.min(Math.max(1, gameState.players.length - 1), gameState.settings.impostorCount + 1)}})} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl">+</button>
+                           <button onClick={() => setGameState(prev => prev ? ({...prev, settings: {impostorCount: Math.max(1, prev.settings.impostorCount - 1)}}) : null)} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl">-</button>
+                           <span className="font-mono text-2xl font-black text-cyan-400">{gameState?.settings.impostorCount || 1}</span>
+                           <button onClick={() => setGameState(prev => prev ? ({...prev, settings: {impostorCount: Math.min(Math.max(1, prev.players.length - 1), prev.settings.impostorCount + 1)}}) : null)} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl">+</button>
                        </div>
                    </div>
-                   <Button onClick={startGame} isLoading={isLoading} disabled={gameState.players.length < 3} size="lg" className="w-full">
+                   <Button onClick={startGame} isLoading={isLoading} disabled={(gameState?.players.length || 0) < 3} size="lg" className="w-full">
                         <Play className="w-5 h-5 fill-current" /> Start Game Session
                    </Button>
-                   {gameState.players.length < 3 && <p className="text-center text-xs text-slate-500 font-medium">Requires 3 or more players</p>}
+                   {(gameState?.players.length || 0) < 3 && <p className="text-center text-xs text-slate-500 font-medium italic">Waiting for at least 3 players to join...</p>}
                </Card>
            ) : (
              <div className="flex flex-col items-center gap-4 py-8">
                 <div className="w-8 h-8 border-4 border-cyan-500/20 border-t-cyan-500 rounded-full animate-spin" />
-                <p className="text-slate-500 font-bold uppercase tracking-widest text-xs">Waiting for host to start...</p>
+                <p className="text-slate-500 font-bold uppercase tracking-widest text-xs">Connected to Lobby {inputCode}. Waiting for host...</p>
              </div>
            )}
         </div>
@@ -268,8 +272,8 @@ const App: React.FC = () => {
                                     <>
                                         <div className="p-6 bg-rose-500/10 rounded-full animate-pulse"><ShieldAlert className="w-24 h-24 text-rose-500" /></div>
                                         <div className="space-y-2">
-                                          <h3 className="text-5xl font-black text-rose-100 italic tracking-tighter">IMPOSTOR</h3>
-                                          <p className="text-rose-400 font-bold text-sm uppercase tracking-widest">You don't know the word!</p>
+                                          <h3 className="text-5xl font-black text-rose-100 italic tracking-tighter uppercase leading-none">Impostor</h3>
+                                          <p className="text-rose-400 font-bold text-sm uppercase tracking-widest mt-2">You don't know the word!</p>
                                         </div>
                                     </>
                                 ) : (
@@ -277,7 +281,7 @@ const App: React.FC = () => {
                                         <div className="p-6 bg-cyan-500/10 rounded-full"><Users className="w-24 h-24 text-cyan-500" /></div>
                                         <div className="space-y-2">
                                           <h3 className="text-slate-400 font-bold text-xs uppercase tracking-[0.2em]">The Secret Word</h3>
-                                          <p className="text-5xl font-black text-white tracking-tight">{gameState.roundData?.topic}</p>
+                                          <p className="text-5xl font-black text-white tracking-tight leading-none">{gameState.roundData?.topic}</p>
                                         </div>
                                     </>
                                 )}
