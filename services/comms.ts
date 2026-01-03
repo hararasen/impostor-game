@@ -1,8 +1,10 @@
+
 import { useEffect, useRef, useCallback } from 'react';
 import { NetworkMessage } from '../types.ts';
 
-// We use a unique prefix to avoid topic collisions on the public ntfy.sh server
 const TOPIC_PREFIX = 'gemini_impostor_game_v2_';
+// Create a unique ID for this specific tab session to ignore our own echoes
+const SESSION_ID = Math.random().toString(36).substring(2, 15);
 
 export const useGameNetwork = (
   roomCode: string | null,
@@ -17,25 +19,22 @@ export const useGameNetwork = (
     const topic = `${TOPIC_PREFIX}${roomCode}`;
     const url = `https://ntfy.sh/${topic}/sse`;
     
-    console.log(`📡 Connecting to cross-device topic: ${topic}`);
-    
     const eventSource = new EventSource(url);
 
     eventSource.onmessage = (event) => {
       try {
         const ntfyData = JSON.parse(event.data);
-        // ntfy.sh sends the payload in the 'message' field
         if (ntfyData.message) {
-          const gameMsg = JSON.parse(ntfyData.message) as NetworkMessage;
-          onMessageRef.current(gameMsg);
+          const envelope = JSON.parse(ntfyData.message);
+          
+          // Ignore messages sent by THIS specific tab/session
+          if (envelope.senderId === SESSION_ID) return;
+          
+          onMessageRef.current(envelope.message as NetworkMessage);
         }
       } catch (e) {
-        // Ignore non-json or malformed messages
+        // Ignore noise
       }
-    };
-
-    eventSource.onerror = () => {
-      console.error("EventSource connection lost. Retrying...");
     };
 
     return () => {
@@ -44,7 +43,6 @@ export const useGameNetwork = (
   }, [roomCode]);
 
   const sendMessage = useCallback(async (msg: NetworkMessage) => {
-    // We determine the room code from the message payload if possible, or use the provided one
     let targetCode = '';
     if (msg.type === 'JOIN_REQUEST') targetCode = msg.payload.roomCode;
     else if (msg.type === 'STATE_UPDATE') targetCode = msg.payload.roomCode;
@@ -53,18 +51,22 @@ export const useGameNetwork = (
     if (!targetCode) return;
 
     const topic = `${TOPIC_PREFIX}${targetCode}`;
+    const payload = {
+      senderId: SESSION_ID,
+      message: msg
+    };
     
     try {
       await fetch(`https://ntfy.sh/${topic}`, {
         method: 'POST',
-        body: JSON.stringify(msg),
+        body: JSON.stringify(payload),
         headers: {
-          'Title': 'Game Update',
+          'Title': 'Impostor Update',
           'Tags': 'video_game'
         }
       });
     } catch (e) {
-      console.error("Failed to send message over network", e);
+      console.error("Network sync failed", e);
     }
   }, [roomCode]);
 
