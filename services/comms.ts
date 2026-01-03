@@ -1,8 +1,7 @@
-
 import { useEffect, useRef, useCallback } from 'react';
 import { NetworkMessage } from '../types.ts';
 
-const TOPIC_PREFIX = 'gemini_impostor_game_v2_';
+const TOPIC_PREFIX = 'gemini_impostor_v3_';
 // Create a unique ID for this specific tab session to ignore our own echoes
 const SESSION_ID = Math.random().toString(36).substring(2, 15);
 
@@ -16,9 +15,10 @@ export const useGameNetwork = (
   useEffect(() => {
     if (!roomCode) return;
 
-    const topic = `${TOPIC_PREFIX}${roomCode}`;
+    const topic = `${TOPIC_PREFIX}${roomCode.toUpperCase()}`;
     const url = `https://ntfy.sh/${topic}/sse`;
     
+    console.log(`📡 Listening on: ${topic}`);
     const eventSource = new EventSource(url);
 
     eventSource.onmessage = (event) => {
@@ -27,14 +27,18 @@ export const useGameNetwork = (
         if (ntfyData.message) {
           const envelope = JSON.parse(ntfyData.message);
           
-          // Ignore messages sent by THIS specific tab/session
+          // Ignore messages sent by THIS specific tab
           if (envelope.senderId === SESSION_ID) return;
           
           onMessageRef.current(envelope.message as NetworkMessage);
         }
       } catch (e) {
-        // Ignore noise
+        // Silently ignore malformed network noise
       }
+    };
+
+    eventSource.onerror = () => {
+      console.warn("Connection dropped, reconnecting...");
     };
 
     return () => {
@@ -50,23 +54,20 @@ export const useGameNetwork = (
 
     if (!targetCode) return;
 
-    const topic = `${TOPIC_PREFIX}${targetCode}`;
+    const topic = `${TOPIC_PREFIX}${targetCode.toUpperCase()}`;
     const payload = {
       senderId: SESSION_ID,
       message: msg
     };
     
     try {
+      // Use no-cors or standard fetch for ntfy POST
       await fetch(`https://ntfy.sh/${topic}`, {
         method: 'POST',
-        body: JSON.stringify(payload),
-        headers: {
-          'Title': 'Impostor Update',
-          'Tags': 'video_game'
-        }
+        body: JSON.stringify(payload)
       });
     } catch (e) {
-      console.error("Network sync failed", e);
+      console.error("Network broadcast failed", e);
     }
   }, [roomCode]);
 

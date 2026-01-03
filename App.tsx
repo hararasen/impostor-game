@@ -19,9 +19,8 @@ import {
   AlertCircle
 } from 'lucide-react';
 
-// 4-char alphanumeric for better uniqueness
 const generateRoomCode = () => {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No O, 0, 1, I
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let res = '';
   for(let i=0; i<4; i++) res += chars.charAt(Math.floor(Math.random() * chars.length));
   return res;
@@ -39,18 +38,19 @@ const App: React.FC = () => {
   const [view, setView] = useState<'LANDING' | 'LOBBY' | 'GAME'>('LANDING');
   const [isRevealed, setIsRevealed] = useState(false);
 
-  // Critical for checking host status inside callbacks without stale closures
-  const isHost = gameState?.players.find(p => p.id === userId)?.isHost || false;
+  // Determine role and status locally
   const me = gameState?.players.find(p => p.id === userId);
+  const isHost = me?.isHost || false;
 
   const handleMessage = useCallback((msg: NetworkMessage) => {
     if (msg.type === 'JOIN_REQUEST') {
-      // Functional update to prevent race conditions when multiple people join
       setGameState(prev => {
         if (!prev) return null;
         const amIHost = prev.players.find(p => p.id === userId)?.isHost;
         if (amIHost && prev.roomCode === msg.payload.roomCode) {
+          // If they are already in the list, just return prev
           if (prev.players.some(p => p.id === msg.payload.playerId)) return prev;
+          
           const newPlayer: Player = { id: msg.payload.playerId, name: msg.payload.name, isHost: false };
           return { ...prev, players: [...prev.players, newPlayer] };
         }
@@ -59,17 +59,18 @@ const App: React.FC = () => {
     } else if (msg.type === 'STATE_UPDATE') {
       setGameState(prev => {
         const amIHost = prev?.players.find(p => p.id === userId)?.isHost;
-        if (amIHost) return prev; // Host ignores other state updates
+        // Host is the source of truth, never overwrite its state from network
+        if (amIHost) return prev; 
+        
         if (msg.payload.roomCode === activeRoomCode) {
           return msg.payload;
         }
         return prev;
       });
     } else if (msg.type === 'RESET_GAME') {
-      setView(v => {
-        // Only switch if we're actually in game
-        if (v === 'GAME') return 'LOBBY';
-        return v;
+      setGameState(prev => {
+        if (!prev) return null;
+        return { ...prev, status: GameStatus.LOBBY, roundData: undefined };
       });
       setIsRevealed(false);
     }
@@ -77,26 +78,31 @@ const App: React.FC = () => {
 
   const { sendMessage } = useGameNetwork(activeRoomCode, handleMessage);
 
-  // Auto-navigation for non-hosts based on state status
+  // --- VIEW SYNC ---
   useEffect(() => {
-    if (!isHost && gameState) {
-      if (gameState.status === GameStatus.PLAYING) setView('GAME');
-      else if (gameState.status === GameStatus.LOBBY) setView('LOBBY');
+    if (gameState) {
+      if (gameState.status === GameStatus.PLAYING && view !== 'GAME') setView('GAME');
+      if (gameState.status === GameStatus.LOBBY && view !== 'LOBBY' && view !== 'LANDING') setView('LOBBY');
     }
-  }, [gameState, isHost]);
+  }, [gameState, view]);
 
-  // Broadcast state regularly if host
+  // --- HOST HEARTBEAT ---
+  // If I'm the host, broadcast the state every 2 seconds to keep everyone synced
   useEffect(() => {
     if (isHost && gameState) {
-      sendMessage({ type: 'STATE_UPDATE', payload: gameState });
+      const interval = setInterval(() => {
+        sendMessage({ type: 'STATE_UPDATE', payload: gameState });
+      }, 2000);
+      return () => clearInterval(interval);
     }
-  }, [gameState, isHost, sendMessage]);
+  }, [isHost, gameState, sendMessage]);
 
-  // Periodic join ping for players not yet in the list
+  // --- JOINING LOOP ---
+  // If I'm trying to join, keep sending my info until I see myself in the list
   useEffect(() => {
     if (view === 'LOBBY' && !isHost && activeRoomCode) {
-      const isInList = gameState?.players.some(p => p.id === userId);
-      if (!isInList) {
+      const amIInList = gameState?.players.some(p => p.id === userId);
+      if (!amIInList) {
         const interval = setInterval(() => {
           sendMessage({ 
             type: 'JOIN_REQUEST', 
@@ -129,6 +135,7 @@ const App: React.FC = () => {
     setError(null);
     setActiveRoomCode(code);
     setView('LOBBY');
+    // Initial join attempt
     sendMessage({ 
       type: 'JOIN_REQUEST', 
       payload: { name: userName, roomCode: code, playerId: userId } 
@@ -158,9 +165,8 @@ const App: React.FC = () => {
       
       setGameState(newState);
       sendMessage({ type: 'STATE_UPDATE', payload: newState });
-      setView('GAME');
     } catch (e) {
-      setError("Topic generation failed. Check internet.");
+      setError("Failed to generate mission. Check connection.");
     } finally {
       setIsLoading(false);
     }
@@ -168,17 +174,15 @@ const App: React.FC = () => {
 
   const resetGame = () => {
     if (!gameState || !isHost) return;
-    setGameState(prev => {
-      if (!prev) return null;
-      return { 
-        ...prev, 
-        status: GameStatus.LOBBY, 
-        roundData: undefined, 
-        players: prev.players.map(p => ({...p, role: undefined})) 
-      };
-    });
+    const lobbyState: GameState = { 
+      ...gameState, 
+      status: GameStatus.LOBBY, 
+      roundData: undefined, 
+      players: gameState.players.map(p => ({...p, role: undefined})) 
+    };
+    setGameState(lobbyState);
     sendMessage({ type: 'RESET_GAME', payload: null });
-    setView('LOBBY');
+    // Heartbeat will handle the rest
     setIsRevealed(false);
   };
 
@@ -209,7 +213,7 @@ const App: React.FC = () => {
           <div className="bg-slate-800/30 p-4 rounded-xl border border-slate-700/50 flex gap-3 items-center">
             <Globe className="w-6 h-6 text-cyan-500 shrink-0" />
             <p className="text-[10px] text-slate-400 uppercase tracking-widest font-black leading-tight">
-              Global Networking Active. Works across any devices with internet.
+              Cross-Device Play Active. All players must have internet.
             </p>
           </div>
         </div>
@@ -236,9 +240,9 @@ const App: React.FC = () => {
               </div>
            </div>
            
-           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 overflow-y-auto max-h-[50vh] pr-2 custom-scrollbar">
+           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[50vh] overflow-y-auto pr-2 custom-scrollbar">
               {gameState?.players.map(player => (
-                  <div key={player.id} className="bg-slate-800/80 border border-slate-700 p-4 rounded-2xl flex items-center gap-4 shadow-lg animate-in fade-in scale-95 border-l-4 border-l-slate-600">
+                  <div key={player.id} className="bg-slate-800/80 border border-slate-700 p-4 rounded-2xl flex items-center gap-4 shadow-lg animate-in fade-in scale-95">
                       <div className={`w-12 h-12 rounded-xl flex items-center justify-center font-black text-xl shadow-inner ${player.isHost ? 'bg-amber-500 text-amber-950' : 'bg-slate-700 text-slate-300'}`}>
                           {player.name[0].toUpperCase()}
                       </div>
@@ -252,7 +256,7 @@ const App: React.FC = () => {
               {!amIInList && (
                 <div className="col-span-full py-12 flex flex-col items-center gap-4 bg-slate-800/20 border-2 border-dashed border-slate-700 rounded-3xl animate-pulse">
                   <div className="w-10 h-10 border-4 border-cyan-500/20 border-t-cyan-500 rounded-full animate-spin" />
-                  <p className="text-slate-500 font-bold uppercase tracking-widest text-sm">Attempting to Join Room {activeRoomCode}...</p>
+                  <p className="text-slate-500 font-bold uppercase tracking-widest text-sm text-center">Attempting to Join Room {activeRoomCode}...</p>
                 </div>
               )}
            </div>
@@ -265,25 +269,20 @@ const App: React.FC = () => {
                          <span className="font-bold text-slate-200">Total Impostors</span>
                        </div>
                        <div className="flex items-center gap-6">
-                           <button onClick={() => setGameState(prev => prev ? ({...prev, settings: {impostorCount: Math.max(1, prev.settings.impostorCount - 1)}}) : null)} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl transition-colors">-</button>
+                           <button onClick={() => setGameState(prev => prev ? ({...prev, settings: {impostorCount: Math.max(1, prev.settings.impostorCount - 1)}}) : null)} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl">-</button>
                            <span className="font-mono text-2xl font-black text-cyan-400 w-8 text-center">{gameState?.settings.impostorCount || 1}</span>
-                           <button onClick={() => setGameState(prev => prev ? ({...prev, settings: {impostorCount: Math.min(Math.max(1, (gameState?.players.length || 1) - 1), prev.settings.impostorCount + 1)}}) : null)} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl transition-colors">+</button>
+                           <button onClick={() => setGameState(prev => prev ? ({...prev, settings: {impostorCount: Math.min(Math.max(1, (gameState?.players.length || 1) - 1), prev.settings.impostorCount + 1)}}) : null)} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl">+</button>
                        </div>
                    </div>
                    <Button onClick={startGame} isLoading={isLoading} disabled={(gameState?.players.length || 0) < 2} size="lg" className="w-full py-6">
                         <Play className="w-6 h-6 fill-current" /> Start Mission
                    </Button>
-                   {(gameState?.players.length || 0) < 3 && (
-                     <div className="flex items-center justify-center gap-2 text-amber-500/70 text-[10px] font-bold uppercase tracking-widest">
-                       <AlertCircle className="w-3 h-3" /> Minimum 2 players to test, 3+ recommended
-                     </div>
-                   )}
                </Card>
            ) : amIInList && (
              <div className="flex flex-col items-center gap-4 py-8 bg-slate-800/20 rounded-3xl border border-slate-800">
                 <div className="w-12 h-12 border-4 border-cyan-500/20 border-t-cyan-500 rounded-full animate-spin" />
                 <div className="text-center">
-                  <p className="text-slate-300 font-black uppercase tracking-[0.2em] text-sm">Successfully Connected!</p>
+                  <p className="text-slate-300 font-black uppercase tracking-[0.2em] text-sm">Synchronized!</p>
                   <p className="text-slate-500 text-[10px] font-bold mt-2 uppercase tracking-widest">The Host is preparing the round...</p>
                 </div>
              </div>
@@ -299,16 +298,16 @@ const App: React.FC = () => {
         <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center">
             <div className="w-full max-w-4xl p-4 flex justify-between items-center border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-20">
                 <div className="flex items-center gap-3 bg-slate-800/50 px-4 py-2 rounded-full border border-slate-700">
-                    <div className={`w-3 h-3 rounded-full animate-pulse ${isHost ? 'bg-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.6)]' : 'bg-cyan-500 shadow-[0_0_10px_rgba(6,182,212,0.6)]'}`} />
+                    <div className={`w-3 h-3 rounded-full animate-pulse ${isHost ? 'bg-amber-500' : 'bg-cyan-500'}`} />
                     <span className="font-black text-xs uppercase tracking-widest">{me.name}</span>
                 </div>
-                {isHost && <Button variant="danger" size="sm" onClick={resetGame} className="px-4 text-xs font-black uppercase tracking-tighter"><RefreshCw className="w-3 h-3" /> End Round</Button>}
+                {isHost && <Button variant="danger" size="sm" onClick={resetGame} className="px-4 text-xs font-black uppercase"><RefreshCw className="w-3 h-3" /> End Round</Button>}
             </div>
 
             <div className="flex-1 w-full max-w-lg flex flex-col items-center justify-center p-6 space-y-12 animate-in fade-in zoom-in duration-700">
                 <div className="text-center space-y-3">
                     <h2 className="text-slate-500 uppercase tracking-[0.4em] text-[10px] font-black">Mission Category</h2>
-                    <p className="text-5xl font-black text-cyan-400 drop-shadow-lg tracking-tight">{gameState.roundData?.category}</p>
+                    <p className="text-5xl font-black text-cyan-400 drop-shadow-lg tracking-tight uppercase">{gameState.roundData?.category}</p>
                 </div>
 
                 <div className="w-full aspect-[4/5] relative perspective-1000">
@@ -323,14 +322,14 @@ const App: React.FC = () => {
                                         <div className="p-8 bg-rose-500/10 rounded-full animate-pulse"><ShieldAlert className="w-28 h-28 text-rose-500" /></div>
                                         <div className="space-y-4">
                                           <h3 className="text-6xl font-black text-rose-100 italic tracking-tighter uppercase leading-none drop-shadow-md">Impostor</h3>
-                                          <p className="text-rose-400 font-bold text-xs uppercase tracking-[0.3em] mt-2 opacity-80">You are the intruder</p>
+                                          <p className="text-rose-400 font-bold text-xs uppercase tracking-[0.3em] mt-2 opacity-80">Find the word by blending in</p>
                                         </div>
                                     </>
                                 ) : (
                                     <>
                                         <div className="p-8 bg-cyan-500/10 rounded-full"><Users className="w-28 h-28 text-cyan-500" /></div>
                                         <div className="space-y-4">
-                                          <h3 className="text-slate-400 font-bold text-[10px] uppercase tracking-[0.4em]">Secret Identification</h3>
+                                          <h3 className="text-slate-400 font-bold text-[10px] uppercase tracking-[0.4em]">Secret Word</h3>
                                           <p className="text-6xl font-black text-white tracking-tighter leading-none drop-shadow-md uppercase">{gameState.roundData?.topic}</p>
                                         </div>
                                     </>
@@ -340,24 +339,17 @@ const App: React.FC = () => {
                                 </div>
                             </div>
                         ) : (
-                            <div className="w-full h-full bg-slate-800 rounded-[3rem] border-4 border-slate-700 flex flex-col items-center justify-center gap-8 transition-all hover:border-slate-500 hover:bg-slate-700/80 shadow-[0_30px_60px_-15px_rgba(0,0,0,0.6)] group">
+                            <div className="w-full h-full bg-slate-800 rounded-[3rem] border-4 border-slate-700 flex flex-col items-center justify-center gap-8 transition-all hover:border-slate-500 hover:bg-slate-700/80 shadow-2xl group">
                                 <div className="w-40 h-40 rounded-full bg-slate-900 flex items-center justify-center border-4 border-slate-800 shadow-inner group-hover:scale-110 transition-transform duration-500 relative">
                                     <span className="text-8xl font-black text-slate-700 select-none">?</span>
-                                    <div className="absolute inset-0 rounded-full border-2 border-cyan-500/0 group-hover:border-cyan-500/20 animate-ping" />
                                 </div>
                                 <div className="text-center space-y-2">
                                   <p className="text-slate-400 font-black uppercase tracking-[0.3em] text-sm">Tap to Reveal</p>
-                                  <p className="text-slate-600 text-[10px] uppercase font-bold tracking-widest">Don't let others see!</p>
+                                  <p className="text-slate-600 text-[10px] uppercase font-bold tracking-widest">Keep it secret!</p>
                                 </div>
                             </div>
                         )}
                     </button>
-                </div>
-                
-                <div className="bg-slate-800/30 px-8 py-5 rounded-3xl border border-slate-700/50 text-center text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 max-w-sm leading-relaxed shadow-lg">
-                    {isImpostor 
-                      ? "Blend in! Ask questions to find out the word without revealing your identity." 
-                      : "The intruder is among you. Listen carefully to find who doesn't know the word."}
                 </div>
             </div>
         </div>
