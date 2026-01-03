@@ -8,20 +8,15 @@ export enum GameStatus {
   PLAYING = 'PLAYING'
 }
 
-export type GameMode = 'LOCAL' | 'ONLINE';
-
 export interface Player {
   id: string;
   name: string;
   role?: 'impostor' | 'innocent';
   hasSeenRole: boolean;
-  isHost?: boolean;
 }
 
 export interface LocalGameState {
   status: GameStatus;
-  mode: GameMode;
-  roomCode?: string;
   players: Player[];
   impostorCount: number;
   currentPlayerIndex: number;
@@ -31,7 +26,7 @@ export interface LocalGameState {
   };
 }
 
-export type NetworkMessage = 
-  | { type: 'JOIN_REQUEST'; payload: { player: Player } }
-  | { type: 'STATE_UPDATE'; payload: { state: LocalGameState } }
-  | { type: 'START_GAME'; payload: { roundData: { category: string; topic: string }; players: Player[] } };
+export interface NetworkMessage {
+  type: string;
+  payload?: any;
+}

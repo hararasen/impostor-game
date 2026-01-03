@@ -1,8 +1,7 @@
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { GameStatus, Player, LocalGameState, GameMode, NetworkMessage } from './types.ts';
+import React, { useState } from 'react';
+import { GameStatus, Player, LocalGameState } from './types.ts';
 import { generateGameTopic } from './services/geminiService.ts';
-import { useGameNetwork } from './services/comms.ts';
 import { Button } from './components/Button.tsx';
 import { Input } from './components/Input.tsx';
 import { Card } from './components/Card.tsx';
@@ -14,17 +13,12 @@ import {
   ShieldAlert,
   ChevronRight,
   Clock,
-  ArrowRight,
-  Globe,
-  Smartphone,
-  Copy,
-  Check
+  Smartphone
 } from 'lucide-react';
 
 const App: React.FC = () => {
   const [state, setState] = useState<LocalGameState>({
     status: GameStatus.LOBBY,
-    mode: 'LOCAL',
     players: [],
     impostorCount: 1,
     currentPlayerIndex: 0
@@ -32,78 +26,21 @@ const App: React.FC = () => {
 
   const [playerCount, setPlayerCount] = useState(4);
   const [names, setNames] = useState<string[]>([]);
-  const [joinCode, setJoinCode] = useState('');
   const [isHolding, setIsHolding] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [copied, setCopied] = useState(false);
 
-  // Network Hook
-  const { sendMessage } = useGameNetwork(state.roomCode || null, (msg) => {
-    if (msg.type === 'JOIN_REQUEST' && state.mode === 'ONLINE' && state.players[0]?.isHost) {
-      // Host receives join request
-      setState(prev => {
-        if (prev.players.find(p => p.id === msg.payload.player.id)) return prev;
-        const newState = { ...prev, players: [...prev.players, msg.payload.player] };
-        sendMessage({ type: 'STATE_UPDATE', payload: { state: newState } });
-        return newState;
-      });
-    } else if (msg.type === 'STATE_UPDATE') {
-      // Clients receive state from host
-      if (state.status !== GameStatus.PLAYING && state.status !== GameStatus.REVEALING) {
-        setState(msg.payload.state);
-      }
-    } else if (msg.type === 'START_GAME') {
-      // All clients start mission
-      setState(prev => ({
-        ...prev,
-        status: GameStatus.PASSING,
-        players: msg.payload.players,
-        roundData: msg.payload.roundData,
-        currentPlayerIndex: 0
-      }));
-    }
-  });
-
-  const generateRoomCode = () => Math.random().toString(36).substring(2, 6).toUpperCase();
-
-  const handleHost = () => {
-    const code = generateRoomCode();
-    const host: Player = { id: Math.random().toString(36).substring(7), name: 'Host', isHost: true, hasSeenRole: false };
+  const handleStartSetup = () => {
     setState({
       status: GameStatus.SETUP,
-      mode: 'ONLINE',
-      roomCode: code,
-      players: [host],
-      impostorCount: 1,
-      currentPlayerIndex: 0
-    });
-  };
-
-  const handleJoin = () => {
-    if (!joinCode || joinCode.length < 3) return;
-    const me: Player = { id: Math.random().toString(36).substring(7), name: 'Guest', hasSeenRole: false };
-    setState({
-      status: GameStatus.SETUP,
-      mode: 'ONLINE',
-      roomCode: joinCode.toUpperCase(),
-      players: [me],
-      impostorCount: 1,
-      currentPlayerIndex: 0
-    });
-    // Send join request immediately
-    setTimeout(() => {
-      sendMessage({ type: 'JOIN_REQUEST', payload: { player: me } }, joinCode.toUpperCase());
-    }, 500);
-  };
-
-  const handleLocal = () => {
-    setState({
-      status: GameStatus.SETUP,
-      mode: 'LOCAL',
       players: [],
       impostorCount: 1,
       currentPlayerIndex: 0
     });
+  };
+
+  const handleEnterNames = () => {
+    setNames(Array(playerCount).fill('').map((_, i) => `Player ${i + 1}`));
+    setState(prev => ({ ...prev, status: GameStatus.NAMES }));
   };
 
   const handleStartGame = async () => {
@@ -124,9 +61,11 @@ const App: React.FC = () => {
       }
 
       // Assign roles
-      const currentPlayers = state.mode === 'LOCAL' 
-        ? names.map((name, i) => ({ id: i.toString(), name: name || `Player ${i+1}`, hasSeenRole: false }))
-        : state.players;
+      const currentPlayers = names.map((name, i) => ({ 
+        id: i.toString(), 
+        name: name || `Player ${i+1}`, 
+        hasSeenRole: false 
+      }));
 
       const indices = Array.from({ length: currentPlayers.length }, (_, i) => i);
       const shuffled = indices.sort(() => Math.random() - 0.5);
@@ -136,13 +75,6 @@ const App: React.FC = () => {
         ...p,
         role: impostorIndices.includes(i) ? 'impostor' : 'innocent',
       }));
-
-      if (state.mode === 'ONLINE') {
-        sendMessage({ 
-          type: 'START_GAME', 
-          payload: { roundData: topicData, players: finalPlayers } 
-        });
-      }
 
       setState(prev => ({
         ...prev,
@@ -158,20 +90,18 @@ const App: React.FC = () => {
     }
   };
 
-  const handleStartSetup = () => {
-    if (state.mode === 'LOCAL') {
-      setNames(Array(playerCount).fill('').map((_, i) => `Player ${i + 1}`));
-      setState(prev => ({ ...prev, status: GameStatus.NAMES }));
-    } else {
-      // Online mode setup is complete, direct to game start
-      handleStartGame();
-    }
+  const resetToLobby = () => {
+    setState({
+      status: GameStatus.LOBBY,
+      players: [],
+      impostorCount: 1,
+      currentPlayerIndex: 0
+    });
   };
 
   const resetToSetup = () => {
     setState({
-      status: GameStatus.LOBBY,
-      mode: 'LOCAL',
+      status: GameStatus.SETUP,
       players: [],
       impostorCount: 1,
       currentPlayerIndex: 0
@@ -214,44 +144,20 @@ const App: React.FC = () => {
   if (state.status === GameStatus.LOBBY) {
     return (
       <Container>
-        <div className="space-y-10 animate-in fade-in zoom-in-95 duration-500">
+        <div className="space-y-12 animate-in fade-in zoom-in-95 duration-500">
           <div className="text-center space-y-4">
             <h1 className="text-7xl font-black bg-gradient-to-br from-cyan-400 via-purple-500 to-rose-500 bg-clip-text text-transparent tracking-tighter drop-shadow-2xl">IMPOSTOR</h1>
             <p className="text-slate-500 font-bold text-[10px] tracking-[0.5em] uppercase">The Ultimate AI Social Deduction</p>
           </div>
 
-          <div className="grid gap-4">
-            <Button variant="primary" size="lg" onClick={handleLocal} className="w-full py-6 rounded-3xl border-b-4 border-cyan-700 active:border-b-0 shadow-2xl">
-              <Smartphone className="w-6 h-6" /> Local Pass & Play
+          <div className="space-y-6">
+            <Button variant="primary" size="lg" onClick={handleStartSetup} className="w-full py-8 rounded-[2rem] border-b-8 border-cyan-700 active:border-b-0 active:translate-y-2 shadow-2xl text-2xl">
+              <Play className="w-8 h-8 fill-current" /> Start Game
             </Button>
             
-            <div className="relative py-4">
-              <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-800"></div></div>
-              <div className="relative flex justify-center text-xs uppercase font-black text-slate-600 tracking-[0.3em] bg-slate-900 px-4">Online (Beta)</div>
+            <div className="text-center">
+               <p className="text-xs font-black text-slate-600 uppercase tracking-widest">Local Pass & Play</p>
             </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <Button variant="secondary" onClick={handleHost} className="py-5 rounded-3xl border-b-4 border-slate-800">
-                <Globe className="w-5 h-5" /> Host
-              </Button>
-              <Button variant="secondary" onClick={() => setJoinCode('JOIN')} className="py-5 rounded-3xl border-b-4 border-slate-800">
-                <Users className="w-5 h-5" /> Join
-              </Button>
-            </div>
-
-            {joinCode === 'JOIN' && (
-              <div className="space-y-3 animate-in slide-in-from-top-4 duration-300">
-                <Input 
-                  autoFocus
-                  placeholder="ROOM CODE" 
-                  value={joinCode === 'JOIN' ? '' : joinCode}
-                  onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-                  className="text-center text-2xl font-black tracking-widest uppercase py-4"
-                  maxLength={4}
-                />
-                <Button variant="primary" onClick={handleJoin} className="w-full py-4">Enter Room</Button>
-              </div>
-            )}
           </div>
         </div>
       </Container>
@@ -259,85 +165,34 @@ const App: React.FC = () => {
   }
 
   if (state.status === GameStatus.SETUP) {
-    const isHost = state.mode === 'LOCAL' || state.players[0]?.isHost;
-
     return (
       <Container>
         <div className="flex-1 flex flex-col space-y-8 animate-in fade-in duration-500">
           <div className="flex justify-between items-center">
-             <Button variant="ghost" size="sm" onClick={resetToSetup}><RefreshCw className="w-4 h-4" /></Button>
+             <Button variant="ghost" size="sm" onClick={resetToLobby}><RefreshCw className="w-4 h-4" /></Button>
              <h2 className="text-sm font-black tracking-[0.3em] uppercase text-slate-500">
-               {state.mode === 'LOCAL' ? 'Local Game' : `Room: ${state.roomCode}`}
+               Game Setup
              </h2>
              <div className="w-10"></div>
           </div>
 
-          {state.mode === 'ONLINE' && (
-            <Card className="text-center space-y-2 border-dashed border-2 border-slate-700">
-              <p className="text-[10px] font-black uppercase text-slate-500 tracking-widest">Share Room Code</p>
-              <div className="flex items-center justify-center gap-4">
-                <h3 className="text-4xl font-black tracking-widest text-white">{state.roomCode}</h3>
-                <button 
-                  onClick={() => {
-                    navigator.clipboard.writeText(state.roomCode || '');
-                    setCopied(true);
-                    setTimeout(() => setCopied(false), 2000);
-                  }}
-                  className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
-                >
-                  {copied ? <Check className="w-5 h-5 text-green-500" /> : <Copy className="w-5 h-5 text-slate-400" />}
-                </button>
-              </div>
-            </Card>
-          )}
-
-          <Card className="space-y-8 flex-1">
-            {state.mode === 'LOCAL' ? (
-              <div className="space-y-6">
-                <div className="space-y-4">
-                  <div className="flex justify-between items-center">
-                    <label className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                      <Users className="w-4 h-4" /> Player Count
-                    </label>
-                    <span className="text-2xl font-black text-cyan-400">{playerCount}</span>
-                  </div>
-                  <input 
-                    type="range" min="3" max="12" 
-                    value={playerCount} 
-                    onChange={(e) => setPlayerCount(parseInt(e.target.value))}
-                    className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500 touch-pan-x"
-                  />
-                </div>
-              </div>
-            ) : (
+          <Card className="space-y-10 flex-1">
+            <div className="space-y-6">
               <div className="space-y-4">
-                <div className="flex justify-between items-center px-2">
-                   <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest">Connected ({state.players.length})</h3>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                    <Users className="w-4 h-4" /> Player Count
+                  </label>
+                  <span className="text-2xl font-black text-cyan-400">{playerCount}</span>
                 </div>
-                <div className="space-y-2 max-h-[40vh] overflow-y-auto">
-                  {state.players.map((p, idx) => (
-                    <div key={p.id} className="flex items-center justify-between p-4 bg-slate-900/50 rounded-2xl border border-slate-700">
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-xs font-black text-slate-500">{idx+1}</div>
-                        {isHost && p.id === state.players[0].id ? (
-                           <Input 
-                             value={p.name} 
-                             onChange={(e) => {
-                               const newPlayers = [...state.players];
-                               newPlayers[idx].name = e.target.value;
-                               setState({ ...state, players: newPlayers });
-                               sendMessage({ type: 'STATE_UPDATE', payload: { state: { ...state, players: newPlayers } } });
-                             }} 
-                             className="!py-1 !px-2 !bg-transparent !border-none font-bold"
-                           />
-                        ) : <span className="font-bold">{p.name}</span>}
-                      </div>
-                      {p.isHost && <ShieldAlert className="w-4 h-4 text-rose-500" />}
-                    </div>
-                  ))}
-                </div>
+                <input 
+                  type="range" min="3" max="12" 
+                  value={playerCount} 
+                  onChange={(e) => setPlayerCount(parseInt(e.target.value))}
+                  className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500 touch-pan-x"
+                />
               </div>
-            )}
+            </div>
 
             <div className="space-y-4 pt-4 border-t border-slate-700">
               <div className="flex justify-between items-center">
@@ -351,20 +206,13 @@ const App: React.FC = () => {
                 value={state.impostorCount} 
                 onChange={(e) => setState({...state, impostorCount: parseInt(e.target.value)})}
                 className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-rose-500 touch-pan-x"
-                disabled={!isHost}
               />
             </div>
           </Card>
 
-          {isHost ? (
-            <Button onClick={handleStartSetup} className="w-full py-5 text-lg rounded-3xl shadow-xl">
-              {state.mode === 'LOCAL' ? 'Enter Player Names' : 'Start Mission'} <ChevronRight className="w-5 h-5" />
-            </Button>
-          ) : (
-            <div className="p-6 bg-slate-800/50 rounded-3xl text-center border border-slate-700 animate-pulse">
-               <p className="text-sm font-bold text-slate-400">Waiting for host to start...</p>
-            </div>
-          )}
+          <Button onClick={handleEnterNames} className="w-full py-5 text-lg rounded-3xl shadow-xl">
+             Enter Player Names <ChevronRight className="w-5 h-5" />
+          </Button>
         </div>
       </Container>
     );
@@ -374,7 +222,12 @@ const App: React.FC = () => {
     return (
       <Container>
         <div className="space-y-6 animate-in slide-in-from-bottom-4 duration-500">
-          <h2 className="text-xl font-black uppercase tracking-widest text-center">Who's In?</h2>
+           <div className="flex justify-between items-center">
+             <Button variant="ghost" size="sm" onClick={resetToSetup}><RefreshCw className="w-4 h-4" /></Button>
+             <h2 className="text-xl font-black uppercase tracking-widest text-center">Who's In?</h2>
+             <div className="w-10"></div>
+          </div>
+          
           <Card className="max-h-[50vh] overflow-y-auto space-y-3 custom-scrollbar">
             {names.map((name, i) => (
               <Input 
@@ -486,7 +339,7 @@ const App: React.FC = () => {
       <Container>
         <div className="w-full flex justify-between items-center mb-8">
            <h1 className="text-xl font-black italic tracking-tighter text-cyan-400 uppercase">Mission Data</h1>
-           <Button variant="ghost" size="sm" onClick={resetToSetup} className="text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-white">
+           <Button variant="ghost" size="sm" onClick={resetToLobby} className="text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-white">
              <RefreshCw className="w-3 h-3" /> Abort
            </Button>
         </div>

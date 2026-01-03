@@ -1,5 +1,5 @@
 {
   "name": "Impostor - AI Party Game",
-  "description": "A multiplayer social deduction game powered by Gemini. Play across devices (phones, tablets, laptops) using room codes!",
+  "description": "A local multiplayer social deduction game powered by Gemini.",
   "requestFramePermissions": []
 }
