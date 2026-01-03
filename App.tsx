@@ -1,3 +1,4 @@
+
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { GameState, GameStatus, Player, NetworkMessage } from './types.ts';
 import { useGameNetwork } from './services/comms.ts';
@@ -11,12 +12,11 @@ import {
   RefreshCw, 
   EyeOff, 
   Crown, 
-  ShieldAlert,
   Settings,
   Wifi,
-  Globe,
+  AlertCircle,
   CheckCircle2,
-  AlertCircle
+  Globe
 } from 'lucide-react';
 
 const generateRoomCode = () => {
@@ -38,69 +38,76 @@ const App: React.FC = () => {
   const [view, setView] = useState<'LANDING' | 'LOBBY' | 'GAME'>('LANDING');
   const [isRevealed, setIsRevealed] = useState(false);
 
-  // Determine role and status locally
+  // Source of truth for Host status
+  const isHostLocal = useRef(false);
+
+  // Computed state
   const me = gameState?.players.find(p => p.id === userId);
-  const isHost = me?.isHost || false;
 
   const handleMessage = useCallback((msg: NetworkMessage) => {
     if (msg.type === 'JOIN_REQUEST') {
+      if (!isHostLocal.current) return;
+      
       setGameState(prev => {
-        if (!prev) return null;
-        const amIHost = prev.players.find(p => p.id === userId)?.isHost;
-        if (amIHost && prev.roomCode === msg.payload.roomCode) {
-          // If they are already in the list, just return prev
-          if (prev.players.some(p => p.id === msg.payload.playerId)) return prev;
-          
-          const newPlayer: Player = { id: msg.payload.playerId, name: msg.payload.name, isHost: false };
-          return { ...prev, players: [...prev.players, newPlayer] };
-        }
-        return prev;
+        if (!prev || prev.roomCode !== msg.payload.roomCode) return prev;
+        // Don't add if already exists
+        if (prev.players.some(p => p.id === msg.payload.playerId)) return prev;
+        
+        const newPlayer: Player = { 
+          id: msg.payload.playerId, 
+          name: msg.payload.name, 
+          isHost: false 
+        };
+        return { ...prev, players: [...prev.players, newPlayer] };
       });
     } else if (msg.type === 'STATE_UPDATE') {
-      setGameState(prev => {
-        const amIHost = prev?.players.find(p => p.id === userId)?.isHost;
-        // Host is the source of truth, never overwrite its state from network
-        if (amIHost) return prev; 
-        
-        if (msg.payload.roomCode === activeRoomCode) {
-          return msg.payload;
-        }
-        return prev;
-      });
+      // Non-hosts adopt the host's state
+      if (!isHostLocal.current && msg.payload.roomCode === activeRoomCode) {
+        setGameState(msg.payload);
+      }
     } else if (msg.type === 'RESET_GAME') {
-      setGameState(prev => {
-        if (!prev) return null;
-        return { ...prev, status: GameStatus.LOBBY, roundData: undefined };
-      });
-      setIsRevealed(false);
+      if (!isHostLocal.current) {
+        setIsRevealed(false);
+      }
     }
-  }, [userId, activeRoomCode]);
+  }, [activeRoomCode]);
 
   const { sendMessage } = useGameNetwork(activeRoomCode, handleMessage);
 
-  // --- VIEW SYNC ---
+  // --- VIEW SYNCHRONIZATION ---
+  // This effect ensures joiners move between screens based on the game status
   useEffect(() => {
-    if (gameState) {
-      if (gameState.status === GameStatus.PLAYING && view !== 'GAME') setView('GAME');
-      if (gameState.status === GameStatus.LOBBY && view !== 'LOBBY' && view !== 'LANDING') setView('LOBBY');
-    }
-  }, [gameState, view]);
+    if (!gameState) return;
 
-  // --- HOST HEARTBEAT ---
-  // If I'm the host, broadcast the state every 2 seconds to keep everyone synced
+    if (gameState.status === GameStatus.PLAYING) {
+      if (view !== 'GAME') setView('GAME');
+    } else if (gameState.status === GameStatus.LOBBY) {
+      if (view === 'GAME') {
+        setView('LOBBY');
+        setIsRevealed(false);
+      }
+    }
+  }, [gameState?.status, view]);
+
+  // --- HOST BROADCASTING ---
+  // Heartbeat: Host sends state every 2 seconds to keep everyone synced
   useEffect(() => {
-    if (isHost && gameState) {
+    if (isHostLocal.current && gameState) {
+      // Send immediately on any state change
+      sendMessage({ type: 'STATE_UPDATE', payload: gameState });
+
+      // And set up the fallback heartbeat
       const interval = setInterval(() => {
         sendMessage({ type: 'STATE_UPDATE', payload: gameState });
       }, 2000);
       return () => clearInterval(interval);
     }
-  }, [isHost, gameState, sendMessage]);
+  }, [gameState, sendMessage]);
 
-  // --- JOINING LOOP ---
-  // If I'm trying to join, keep sending my info until I see myself in the list
+  // --- JOINER HANDSHAKE ---
+  // Keep requesting to join until the Host's state broadcast includes us
   useEffect(() => {
-    if (view === 'LOBBY' && !isHost && activeRoomCode) {
+    if (view === 'LOBBY' && !isHostLocal.current && activeRoomCode) {
       const amIInList = gameState?.players.some(p => p.id === userId);
       if (!amIInList) {
         const interval = setInterval(() => {
@@ -112,12 +119,13 @@ const App: React.FC = () => {
         return () => clearInterval(interval);
       }
     }
-  }, [view, isHost, gameState, activeRoomCode, userName, userId, sendMessage]);
+  }, [view, activeRoomCode, gameState?.players, userName, userId, sendMessage]);
 
   const createGame = () => {
     if (!userName.trim()) return setError("Please enter your name");
     setError(null);
     const code = generateRoomCode();
+    isHostLocal.current = true;
     const newGameState: GameState = {
       roomCode: code,
       status: GameStatus.LOBBY,
@@ -133,6 +141,7 @@ const App: React.FC = () => {
     const code = inputCode.trim().toUpperCase();
     if (!userName.trim() || !code) return setError("Name and Room Code are required");
     setError(null);
+    isHostLocal.current = false;
     setActiveRoomCode(code);
     setView('LOBBY');
     // Initial join attempt
@@ -143,8 +152,9 @@ const App: React.FC = () => {
   };
 
   const startGame = async () => {
-    if (!gameState || !isHost) return;
+    if (!gameState || !isHostLocal.current) return;
     setIsLoading(true);
+    setError(null);
     try {
       const { category, topic } = await generateGameTopic();
       const impostorCount = gameState.settings.impostorCount;
@@ -165,15 +175,16 @@ const App: React.FC = () => {
       
       setGameState(newState);
       sendMessage({ type: 'STATE_UPDATE', payload: newState });
+      setView('GAME');
     } catch (e) {
-      setError("Failed to generate mission. Check connection.");
+      setError("AI Topic service is busy. Try again.");
     } finally {
       setIsLoading(false);
     }
   };
 
   const resetGame = () => {
-    if (!gameState || !isHost) return;
+    if (!gameState || !isHostLocal.current) return;
     const lobbyState: GameState = { 
       ...gameState, 
       status: GameStatus.LOBBY, 
@@ -181,21 +192,27 @@ const App: React.FC = () => {
       players: gameState.players.map(p => ({...p, role: undefined})) 
     };
     setGameState(lobbyState);
-    sendMessage({ type: 'RESET_GAME', payload: null });
-    // Heartbeat will handle the rest
+    sendMessage({ type: 'STATE_UPDATE', payload: lobbyState });
+    setView('LOBBY');
     setIsRevealed(false);
   };
 
   if (view === 'LANDING') {
     return (
       <div className="min-h-screen bg-slate-900 text-slate-100 flex items-center justify-center p-4">
-        <div className="max-w-md w-full space-y-8 animate-in fade-in zoom-in duration-500">
+        <div className="max-w-md w-full space-y-8 animate-in fade-in duration-500">
           <div className="text-center space-y-2">
             <h1 className="text-6xl font-black bg-gradient-to-br from-cyan-400 via-purple-500 to-rose-500 bg-clip-text text-transparent tracking-tighter">IMPOSTOR</h1>
             <p className="text-slate-400 font-medium text-sm tracking-widest uppercase font-bold">Multiplayer Social Deduction</p>
           </div>
           <Card>
             <div className="space-y-6">
+              {error && (
+                <div className="bg-rose-500/10 border border-rose-500/20 text-rose-400 px-4 py-3 rounded-xl flex items-center gap-2 text-sm">
+                  <AlertCircle className="w-4 h-4" />
+                  {error}
+                </div>
+              )}
               <Input label="Your Name" placeholder="Enter nickname" value={userName} onChange={(e) => setUserName(e.target.value)} />
               <div className="grid grid-cols-2 gap-4">
                  <Button onClick={createGame} className="w-full flex-col py-6 gap-2">
@@ -209,11 +226,10 @@ const App: React.FC = () => {
               </div>
             </div>
           </Card>
-          {error && <div className="text-rose-400 text-center text-sm bg-rose-950/30 p-3 rounded-xl border border-rose-900/50 flex gap-2 items-center justify-center"><AlertCircle className="w-4 h-4"/> {error}</div>}
           <div className="bg-slate-800/30 p-4 rounded-xl border border-slate-700/50 flex gap-3 items-center">
             <Globe className="w-6 h-6 text-cyan-500 shrink-0" />
             <p className="text-[10px] text-slate-400 uppercase tracking-widest font-black leading-tight">
-              Cross-Device Play Active. All players must have internet.
+              Instant Sync Active. All devices connected to global relay.
             </p>
           </div>
         </div>
@@ -224,137 +240,116 @@ const App: React.FC = () => {
   if (view === 'LOBBY') {
     const amIInList = gameState?.players.some(p => p.id === userId);
     return (
-      <div className="min-h-screen bg-slate-900 text-slate-100 p-6 flex flex-col items-center">
-        <div className="max-w-2xl w-full space-y-8 animate-in slide-in-from-bottom-4 duration-500">
-           <div className="flex items-end justify-between border-b border-slate-800 pb-6">
-              <div className="space-y-1">
-                  <div className="flex items-center gap-2 text-cyan-500">
-                    <Wifi className="w-3 h-3 animate-pulse" />
-                    <h2 className="text-xs font-black uppercase tracking-[0.2em]">Room Code</h2>
-                  </div>
-                  <div className="text-7xl font-mono font-black text-cyan-400 leading-none drop-shadow-[0_0_20px_rgba(34,211,238,0.4)] tracking-wider uppercase">{activeRoomCode}</div>
-              </div>
-              <div className="text-right hidden sm:block">
-                  <div className="text-slate-500 text-xs font-black uppercase tracking-[0.2em]">Players Joined</div>
-                  <div className="text-5xl font-black text-slate-300 leading-none">{gameState?.players.length || 0}</div>
-              </div>
-           </div>
-           
-           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[50vh] overflow-y-auto pr-2 custom-scrollbar">
-              {gameState?.players.map(player => (
-                  <div key={player.id} className="bg-slate-800/80 border border-slate-700 p-4 rounded-2xl flex items-center gap-4 shadow-lg animate-in fade-in scale-95">
-                      <div className={`w-12 h-12 rounded-xl flex items-center justify-center font-black text-xl shadow-inner ${player.isHost ? 'bg-amber-500 text-amber-950' : 'bg-slate-700 text-slate-300'}`}>
-                          {player.name[0].toUpperCase()}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                          <div className="font-bold truncate text-lg">{player.name} {player.id === userId && <span className="text-cyan-500 font-normal text-xs">(You)</span>}</div>
-                          {player.isHost && <div className="text-xs text-amber-500 font-bold flex items-center gap-1 uppercase tracking-wider"><Crown className="w-3 h-3"/> Host</div>}
-                      </div>
-                      {player.id === userId && <CheckCircle2 className="w-5 h-5 text-cyan-500" />}
-                  </div>
-              ))}
-              {!amIInList && (
-                <div className="col-span-full py-12 flex flex-col items-center gap-4 bg-slate-800/20 border-2 border-dashed border-slate-700 rounded-3xl animate-pulse">
-                  <div className="w-10 h-10 border-4 border-cyan-500/20 border-t-cyan-500 rounded-full animate-spin" />
-                  <p className="text-slate-500 font-bold uppercase tracking-widest text-sm text-center">Attempting to Join Room {activeRoomCode}...</p>
-                </div>
-              )}
-           </div>
+      <div className="min-h-screen bg-slate-900 text-slate-100 flex items-center justify-center p-4">
+        <div className="max-w-xl w-full space-y-6 animate-in slide-in-from-bottom-4 duration-500">
+          <div className="flex items-end justify-between border-b border-slate-800 pb-6">
+            <div className="space-y-1">
+              <h2 className="text-xs font-black uppercase tracking-widest text-cyan-500 flex items-center gap-2">
+                <Wifi className="w-3 h-3 animate-pulse" /> Room Code
+              </h2>
+              <div className="text-6xl font-black font-mono text-cyan-400 tracking-tighter uppercase">{activeRoomCode}</div>
+            </div>
+            <div className="text-right">
+              <div className="text-slate-500 text-[10px] font-black uppercase tracking-widest">Players</div>
+              <div className="text-4xl font-black text-slate-300">{gameState?.players.length || 0}</div>
+            </div>
+          </div>
 
-           {isHost ? (
-               <Card className="space-y-6 border-cyan-500/20 bg-cyan-500/5">
-                   <div className="flex items-center justify-between bg-slate-900/50 p-4 rounded-xl border border-slate-800">
-                       <div className="flex items-center gap-3">
-                         <div className="p-2 bg-cyan-500/10 rounded-lg"><Settings className="w-5 h-5 text-cyan-500" /></div>
-                         <span className="font-bold text-slate-200">Total Impostors</span>
-                       </div>
-                       <div className="flex items-center gap-6">
-                           <button onClick={() => setGameState(prev => prev ? ({...prev, settings: {impostorCount: Math.max(1, prev.settings.impostorCount - 1)}}) : null)} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl">-</button>
-                           <span className="font-mono text-2xl font-black text-cyan-400 w-8 text-center">{gameState?.settings.impostorCount || 1}</span>
-                           <button onClick={() => setGameState(prev => prev ? ({...prev, settings: {impostorCount: Math.min(Math.max(1, (gameState?.players.length || 1) - 1), prev.settings.impostorCount + 1)}}) : null)} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl">+</button>
-                       </div>
-                   </div>
-                   <Button onClick={startGame} isLoading={isLoading} disabled={(gameState?.players.length || 0) < 2} size="lg" className="w-full py-6">
-                        <Play className="w-6 h-6 fill-current" /> Start Mission
-                   </Button>
-               </Card>
-           ) : amIInList && (
-             <div className="flex flex-col items-center gap-4 py-8 bg-slate-800/20 rounded-3xl border border-slate-800">
-                <div className="w-12 h-12 border-4 border-cyan-500/20 border-t-cyan-500 rounded-full animate-spin" />
-                <div className="text-center">
-                  <p className="text-slate-300 font-black uppercase tracking-[0.2em] text-sm">Synchronized!</p>
-                  <p className="text-slate-500 text-[10px] font-bold mt-2 uppercase tracking-widest">The Host is preparing the round...</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[40vh] overflow-y-auto pr-2 custom-scrollbar">
+            {gameState?.players.map(player => (
+              <div key={player.id} className={`p-4 rounded-2xl flex items-center gap-4 border transition-all ${player.id === userId ? 'bg-slate-800 border-cyan-500/50 shadow-lg shadow-cyan-500/10' : 'bg-slate-800/50 border-slate-700'}`}>
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-black text-lg ${player.isHost ? 'bg-amber-500 text-amber-950' : 'bg-slate-700 text-slate-300'}`}>
+                  {player.name[0].toUpperCase()}
                 </div>
-             </div>
-           )}
+                <div className="flex-1 min-w-0">
+                  <div className="font-bold truncate text-slate-200">{player.name} {player.id === userId && <span className="text-cyan-500 text-[10px] uppercase ml-1">(You)</span>}</div>
+                  {player.isHost && <div className="text-[10px] text-amber-500 font-black uppercase tracking-widest flex items-center gap-1"><Crown className="w-2.5 h-2.5"/> Host</div>}
+                </div>
+                {player.id === userId && <CheckCircle2 className="w-4 h-4 text-cyan-500" />}
+              </div>
+            ))}
+            {!amIInList && (
+               <div className="col-span-full py-10 flex flex-col items-center gap-3 bg-slate-800/20 border-2 border-dashed border-slate-700 rounded-3xl animate-pulse">
+                  <div className="w-8 h-8 border-4 border-cyan-500/20 border-t-cyan-500 rounded-full animate-spin" />
+                  <p className="text-slate-500 font-bold uppercase tracking-widest text-xs">Awaiting Host Confirmation...</p>
+               </div>
+            )}
+          </div>
+
+          {isHostLocal.current ? (
+            <Card className="space-y-6">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-slate-400 text-xs uppercase tracking-widest">Game Settings</span>
+                <span className="text-cyan-400 font-black text-sm">{gameState?.settings.impostorCount} Impostor(s)</span>
+              </div>
+              <Button onClick={startGame} isLoading={isLoading} disabled={(gameState?.players.length || 0) < 2} className="w-full py-5">
+                <Play className="w-5 h-5 fill-current" /> Start Mission
+              </Button>
+            </Card>
+          ) : amIInList && (
+            <div className="text-center py-6 bg-slate-800/30 rounded-3xl border border-slate-800">
+               <p className="text-cyan-500 font-black uppercase tracking-[0.3em] text-xs">Waiting for Host...</p>
+            </div>
+          )}
         </div>
       </div>
     );
   }
 
   if (view === 'GAME' && gameState && me) {
-      const isImpostor = me.role === 'impostor';
-      return (
-        <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center">
-            <div className="w-full max-w-4xl p-4 flex justify-between items-center border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-20">
-                <div className="flex items-center gap-3 bg-slate-800/50 px-4 py-2 rounded-full border border-slate-700">
-                    <div className={`w-3 h-3 rounded-full animate-pulse ${isHost ? 'bg-amber-500' : 'bg-cyan-500'}`} />
-                    <span className="font-black text-xs uppercase tracking-widest">{me.name}</span>
-                </div>
-                {isHost && <Button variant="danger" size="sm" onClick={resetGame} className="px-4 text-xs font-black uppercase"><RefreshCw className="w-3 h-3" /> End Round</Button>}
-            </div>
-
-            <div className="flex-1 w-full max-w-lg flex flex-col items-center justify-center p-6 space-y-12 animate-in fade-in zoom-in duration-700">
-                <div className="text-center space-y-3">
-                    <h2 className="text-slate-500 uppercase tracking-[0.4em] text-[10px] font-black">Mission Category</h2>
-                    <p className="text-5xl font-black text-cyan-400 drop-shadow-lg tracking-tight uppercase">{gameState.roundData?.category}</p>
-                </div>
-
-                <div className="w-full aspect-[4/5] relative perspective-1000">
-                    <button 
-                      onClick={() => setIsRevealed(!isRevealed)} 
-                      className="w-full h-full relative group focus:outline-none"
-                    >
-                        {isRevealed ? (
-                            <div className={`w-full h-full rounded-[3rem] p-10 flex flex-col items-center justify-center text-center gap-8 shadow-2xl border-4 transition-all duration-500 ${isImpostor ? 'bg-gradient-to-br from-rose-900 via-rose-950 to-black border-rose-500 shadow-rose-900/60' : 'bg-gradient-to-br from-cyan-900 via-cyan-950 to-black border-cyan-500 shadow-cyan-900/60'}`}>
-                                {isImpostor ? (
-                                    <>
-                                        <div className="p-8 bg-rose-500/10 rounded-full animate-pulse"><ShieldAlert className="w-28 h-28 text-rose-500" /></div>
-                                        <div className="space-y-4">
-                                          <h3 className="text-6xl font-black text-rose-100 italic tracking-tighter uppercase leading-none drop-shadow-md">Impostor</h3>
-                                          <p className="text-rose-400 font-bold text-xs uppercase tracking-[0.3em] mt-2 opacity-80">Find the word by blending in</p>
-                                        </div>
-                                    </>
-                                ) : (
-                                    <>
-                                        <div className="p-8 bg-cyan-500/10 rounded-full"><Users className="w-28 h-28 text-cyan-500" /></div>
-                                        <div className="space-y-4">
-                                          <h3 className="text-slate-400 font-bold text-[10px] uppercase tracking-[0.4em]">Secret Word</h3>
-                                          <p className="text-6xl font-black text-white tracking-tighter leading-none drop-shadow-md uppercase">{gameState.roundData?.topic}</p>
-                                        </div>
-                                    </>
-                                )}
-                                <div className="absolute bottom-12 flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.3em] text-slate-500">
-                                    <EyeOff className="w-4 h-4" /> Tap to Hide Secret
-                                </div>
-                            </div>
-                        ) : (
-                            <div className="w-full h-full bg-slate-800 rounded-[3rem] border-4 border-slate-700 flex flex-col items-center justify-center gap-8 transition-all hover:border-slate-500 hover:bg-slate-700/80 shadow-2xl group">
-                                <div className="w-40 h-40 rounded-full bg-slate-900 flex items-center justify-center border-4 border-slate-800 shadow-inner group-hover:scale-110 transition-transform duration-500 relative">
-                                    <span className="text-8xl font-black text-slate-700 select-none">?</span>
-                                </div>
-                                <div className="text-center space-y-2">
-                                  <p className="text-slate-400 font-black uppercase tracking-[0.3em] text-sm">Tap to Reveal</p>
-                                  <p className="text-slate-600 text-[10px] uppercase font-bold tracking-widest">Keep it secret!</p>
-                                </div>
-                            </div>
-                        )}
-                    </button>
-                </div>
-            </div>
+    const isImpostor = me.role === 'impostor';
+    return (
+      <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center p-4">
+        <div className="w-full max-w-md flex justify-between items-center mb-12">
+           <div className="flex items-center gap-2 px-4 py-2 bg-slate-800 rounded-full border border-slate-700">
+              <div className={`w-2 h-2 rounded-full animate-pulse ${isImpostor ? 'bg-rose-500' : 'bg-cyan-500'}`} />
+              <span className="text-[10px] font-black uppercase tracking-widest">{me.name}</span>
+           </div>
+           {isHostLocal.current && <Button variant="ghost" size="sm" onClick={resetGame} className="text-[10px] uppercase font-black"><RefreshCw className="w-3 h-3" /> End Round</Button>}
         </div>
-      );
+
+        <div className="max-w-md w-full flex-1 flex flex-col items-center justify-center space-y-10 animate-in zoom-in-95 duration-500">
+          <div className="text-center space-y-2">
+            <h2 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.4em]">Mission Category</h2>
+            <p className="text-4xl font-black text-white uppercase tracking-tight">{gameState.roundData?.category}</p>
+          </div>
+
+          <div className="w-full aspect-[4/5] relative">
+            <button 
+              onClick={() => setIsRevealed(!isRevealed)}
+              className="w-full h-full relative group perspective-1000"
+            >
+              <div className={`w-full h-full rounded-[3rem] p-8 flex flex-col items-center justify-center text-center gap-6 border-4 transition-all duration-700 ${isRevealed ? (isImpostor ? 'bg-rose-950 border-rose-500' : 'bg-cyan-950 border-cyan-500') : 'bg-slate-800 border-slate-700'}`}>
+                {isRevealed ? (
+                  <>
+                    <h3 className={`text-5xl font-black italic tracking-tighter ${isImpostor ? 'text-rose-500' : 'text-cyan-400'}`}>
+                      {isImpostor ? 'IMPOSTOR' : 'INNOCENT'}
+                    </h3>
+                    <div className="space-y-2">
+                      <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-500">Secret Word</p>
+                      <p className="text-4xl font-black text-white uppercase">{isImpostor ? '???' : gameState.roundData?.topic}</p>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-32 h-32 rounded-full bg-slate-900 flex items-center justify-center border-4 border-slate-700 group-hover:scale-105 transition-transform">
+                      <span className="text-6xl font-black text-slate-600">?</span>
+                    </div>
+                    <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-500">Tap to Reveal</p>
+                  </>
+                )}
+              </div>
+            </button>
+          </div>
+
+          <p className="text-slate-500 text-[10px] font-bold uppercase tracking-widest text-center px-8">
+            {isImpostor ? "Find the word by listening to clues." : "Give clues without revealing the word."}
+          </p>
+        </div>
+      </div>
+    );
   }
+
   return null;
 };
 
