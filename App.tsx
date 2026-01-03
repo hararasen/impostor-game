@@ -106,31 +106,21 @@ const App: React.FC = () => {
     });
   };
 
-  const handleStartSetup = () => {
-    if (state.mode === 'LOCAL') {
-      setNames(Array(playerCount).fill('').map((_, i) => `Player ${i + 1}`));
-      setState(prev => ({ ...prev, status: GameStatus.NAMES }));
-    } else {
-      // Online mode setup is mostly handled in the setup screen already
-    }
-  };
-
   const handleStartGame = async () => {
     if (isLoading) return;
     setIsLoading(true);
 
     try {
-      // Fetch topic from Gemini with a timeout race
+      // Fetch topic from Gemini with a timeout race as a network safety net
       const topicPromise = generateGameTopic();
       const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000));
       
       let topicData = await Promise.race([topicPromise, timeoutPromise]);
       
-      // If API hangs, we rely on the built-in local fallback in generateGameTopic
-      // but just in case, we check if it's still null (timeout reached)
+      // If API times out (returns null), fallback to retrying generating topic (which defaults to local)
       if (!topicData) {
         console.warn("API Timed out, using internal fallback");
-        topicData = await generateGameTopic(); // This will eventually return something
+        topicData = await generateGameTopic(); 
       }
 
       // Assign roles
@@ -165,6 +155,16 @@ const App: React.FC = () => {
       console.error("Game start error:", e);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleStartSetup = () => {
+    if (state.mode === 'LOCAL') {
+      setNames(Array(playerCount).fill('').map((_, i) => `Player ${i + 1}`));
+      setState(prev => ({ ...prev, status: GameStatus.NAMES }));
+    } else {
+      // Online mode setup is complete, direct to game start
+      handleStartGame();
     }
   };
 

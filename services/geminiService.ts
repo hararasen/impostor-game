@@ -78,9 +78,17 @@ const TOPIC_BANK: TopicResponse[] = [
 const getLocalTopic = () => TOPIC_BANK[Math.floor(Math.random() * TOPIC_BANK.length)];
 
 export const generateGameTopic = async (): Promise<TopicResponse> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
+  // We wrap the entire execution in a try-catch to ensure that if the API key is missing
+  // or the constructor throws, we gracefully fall back to local topics.
   try {
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) {
+      console.warn("No API Key found, using local topics.");
+      return getLocalTopic();
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
+
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: "Generate a creative, common-knowledge topic for a social deduction game. It MUST be a single, simple noun (e.g., 'Toaster', 'Eiffel Tower', 'Penguin'). Avoid activities, phrases, or verbs.",
@@ -112,6 +120,7 @@ export const generateGameTopic = async (): Promise<TopicResponse> => {
     }
     return getLocalTopic();
   } catch (error) {
+    console.error("Gemini API Error (using fallback):", error);
     return getLocalTopic();
   }
 };
