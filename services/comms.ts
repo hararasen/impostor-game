@@ -1,39 +1,72 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { NetworkMessage } from '../types.ts';
 
-const CHANNEL_NAME = 'impostor_game_v1';
+// We use a unique prefix to avoid topic collisions on the public ntfy.sh server
+const TOPIC_PREFIX = 'gemini_impostor_game_v2_';
 
 export const useGameNetwork = (
+  roomCode: string | null,
   onMessage: (msg: NetworkMessage) => void
 ) => {
-  const channelRef = useRef<BroadcastChannel | null>(null);
   const onMessageRef = useRef(onMessage);
-  
-  // Always keep the ref up to date with the latest callback
   onMessageRef.current = onMessage;
 
   useEffect(() => {
-    const bc = new BroadcastChannel(CHANNEL_NAME);
-    channelRef.current = bc;
+    if (!roomCode) return;
 
-    const listener = (event: MessageEvent) => {
-      // Don't process messages sent by ourselves if BroadcastChannel did that (usually it doesn't)
-      onMessageRef.current(event.data as NetworkMessage);
+    const topic = `${TOPIC_PREFIX}${roomCode}`;
+    const url = `https://ntfy.sh/${topic}/sse`;
+    
+    console.log(`📡 Connecting to cross-device topic: ${topic}`);
+    
+    const eventSource = new EventSource(url);
+
+    eventSource.onmessage = (event) => {
+      try {
+        const ntfyData = JSON.parse(event.data);
+        // ntfy.sh sends the payload in the 'message' field
+        if (ntfyData.message) {
+          const gameMsg = JSON.parse(ntfyData.message) as NetworkMessage;
+          onMessageRef.current(gameMsg);
+        }
+      } catch (e) {
+        // Ignore non-json or malformed messages
+      }
     };
 
-    bc.addEventListener('message', listener);
+    eventSource.onerror = () => {
+      console.error("EventSource connection lost. Retrying...");
+    };
 
     return () => {
-      bc.removeEventListener('message', listener);
-      bc.close();
+      eventSource.close();
     };
-  }, []);
+  }, [roomCode]);
 
-  const sendMessage = useCallback((msg: NetworkMessage) => {
-    if (channelRef.current) {
-      channelRef.current.postMessage(msg);
+  const sendMessage = useCallback(async (msg: NetworkMessage) => {
+    // We determine the room code from the message payload if possible, or use the provided one
+    let targetCode = '';
+    if (msg.type === 'JOIN_REQUEST') targetCode = msg.payload.roomCode;
+    else if (msg.type === 'STATE_UPDATE') targetCode = msg.payload.roomCode;
+    else if (roomCode) targetCode = roomCode;
+
+    if (!targetCode) return;
+
+    const topic = `${TOPIC_PREFIX}${targetCode}`;
+    
+    try {
+      await fetch(`https://ntfy.sh/${topic}`, {
+        method: 'POST',
+        body: JSON.stringify(msg),
+        headers: {
+          'Title': 'Game Update',
+          'Tags': 'video_game'
+        }
+      });
+    } catch (e) {
+      console.error("Failed to send message over network", e);
     }
-  }, []);
+  }, [roomCode]);
 
   return { sendMessage };
 };
