@@ -1,5 +1,6 @@
 
 export enum GameStatus {
+  LOBBY = 'LOBBY',
   SETUP = 'SETUP',
   NAMES = 'NAMES',
   PASSING = 'PASSING',
@@ -7,15 +8,20 @@ export enum GameStatus {
   PLAYING = 'PLAYING'
 }
 
+export type GameMode = 'LOCAL' | 'ONLINE';
+
 export interface Player {
   id: string;
   name: string;
   role?: 'impostor' | 'innocent';
   hasSeenRole: boolean;
+  isHost?: boolean;
 }
 
 export interface LocalGameState {
   status: GameStatus;
+  mode: GameMode;
+  roomCode?: string;
   players: Player[];
   impostorCount: number;
   currentPlayerIndex: number;
@@ -25,11 +31,7 @@ export interface LocalGameState {
   };
 }
 
-/**
- * Added NetworkMessage type to fix: Module '"../types.ts"' has no exported member 'NetworkMessage'.
- * This defines the protocol for peer-to-peer game state updates and requests.
- */
 export type NetworkMessage = 
-  | { type: 'JOIN_REQUEST'; payload: { roomCode: string } }
-  | { type: 'STATE_UPDATE'; payload: { roomCode: string; state: LocalGameState } }
-  | { type: string; payload: any };
+  | { type: 'JOIN_REQUEST'; payload: { player: Player } }
+  | { type: 'STATE_UPDATE'; payload: { state: LocalGameState } }
+  | { type: 'START_GAME'; payload: { roundData: { category: string; topic: string }; players: Player[] } };
