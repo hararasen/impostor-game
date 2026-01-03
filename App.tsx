@@ -1,4 +1,3 @@
-
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { GameState, GameStatus, Player, NetworkMessage } from './types.ts';
 import { useGameNetwork } from './services/comms.ts';
@@ -16,10 +15,17 @@ import {
   Settings,
   Wifi,
   Globe,
-  CheckCircle2
+  CheckCircle2,
+  AlertCircle
 } from 'lucide-react';
 
-const generateRoomCode = () => Math.floor(100 + Math.random() * 900).toString();
+// 4-char alphanumeric for better uniqueness
+const generateRoomCode = () => {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No O, 0, 1, I
+  let res = '';
+  for(let i=0; i<4; i++) res += chars.charAt(Math.floor(Math.random() * chars.length));
+  return res;
+};
 const generateId = () => Math.random().toString(36).substring(2, 9);
 
 const App: React.FC = () => {
@@ -33,47 +39,60 @@ const App: React.FC = () => {
   const [view, setView] = useState<'LANDING' | 'LOBBY' | 'GAME'>('LANDING');
   const [isRevealed, setIsRevealed] = useState(false);
 
-  const gameStateRef = useRef<GameState | null>(null);
-  gameStateRef.current = gameState;
-
+  // Critical for checking host status inside callbacks without stale closures
+  const isHost = gameState?.players.find(p => p.id === userId)?.isHost || false;
   const me = gameState?.players.find(p => p.id === userId);
-  const isHost = me?.isHost || false;
 
   const handleMessage = useCallback((msg: NetworkMessage) => {
-    const currentState = gameStateRef.current;
-
     if (msg.type === 'JOIN_REQUEST') {
-      const amIHost = currentState?.players.find(p => p.id === userId)?.isHost;
-      if (amIHost && currentState.roomCode === msg.payload.roomCode) {
-        if (currentState.players.some(p => p.id === msg.payload.playerId)) return;
-        const newPlayer: Player = { id: msg.payload.playerId, name: msg.payload.name, isHost: false };
-        setGameState({ ...currentState, players: [...currentState.players, newPlayer] });
-      }
+      // Functional update to prevent race conditions when multiple people join
+      setGameState(prev => {
+        if (!prev) return null;
+        const amIHost = prev.players.find(p => p.id === userId)?.isHost;
+        if (amIHost && prev.roomCode === msg.payload.roomCode) {
+          if (prev.players.some(p => p.id === msg.payload.playerId)) return prev;
+          const newPlayer: Player = { id: msg.payload.playerId, name: msg.payload.name, isHost: false };
+          return { ...prev, players: [...prev.players, newPlayer] };
+        }
+        return prev;
+      });
     } else if (msg.type === 'STATE_UPDATE') {
-      const amIHost = currentState?.players.find(p => p.id === userId)?.isHost;
-      if (amIHost) return;
-      if (msg.payload.roomCode === activeRoomCode) {
-        setGameState(msg.payload);
-        if (msg.payload.status === GameStatus.PLAYING) setView('GAME');
-        else if (msg.payload.status === GameStatus.LOBBY) setView('LOBBY');
-      }
+      setGameState(prev => {
+        const amIHost = prev?.players.find(p => p.id === userId)?.isHost;
+        if (amIHost) return prev; // Host ignores other state updates
+        if (msg.payload.roomCode === activeRoomCode) {
+          return msg.payload;
+        }
+        return prev;
+      });
     } else if (msg.type === 'RESET_GAME') {
-      const amIHost = currentState?.players.find(p => p.id === userId)?.isHost;
-      if (!amIHost && currentState?.roomCode === activeRoomCode) {
-        setView('LOBBY');
-        setIsRevealed(false);
-      }
+      setView(v => {
+        // Only switch if we're actually in game
+        if (v === 'GAME') return 'LOBBY';
+        return v;
+      });
+      setIsRevealed(false);
     }
   }, [userId, activeRoomCode]);
 
   const { sendMessage } = useGameNetwork(activeRoomCode, handleMessage);
 
+  // Auto-navigation for non-hosts based on state status
+  useEffect(() => {
+    if (!isHost && gameState) {
+      if (gameState.status === GameStatus.PLAYING) setView('GAME');
+      else if (gameState.status === GameStatus.LOBBY) setView('LOBBY');
+    }
+  }, [gameState, isHost]);
+
+  // Broadcast state regularly if host
   useEffect(() => {
     if (isHost && gameState) {
       sendMessage({ type: 'STATE_UPDATE', payload: gameState });
     }
   }, [gameState, isHost, sendMessage]);
 
+  // Periodic join ping for players not yet in the list
   useEffect(() => {
     if (view === 'LOBBY' && !isHost && activeRoomCode) {
       const isInList = gameState?.players.some(p => p.id === userId);
@@ -105,13 +124,14 @@ const App: React.FC = () => {
   };
 
   const joinGame = () => {
-    if (!userName.trim() || !inputCode.trim()) return setError("Name and Room Code are required");
+    const code = inputCode.trim().toUpperCase();
+    if (!userName.trim() || !code) return setError("Name and Room Code are required");
     setError(null);
-    setActiveRoomCode(inputCode);
+    setActiveRoomCode(code);
     setView('LOBBY');
     sendMessage({ 
       type: 'JOIN_REQUEST', 
-      payload: { name: userName, roomCode: inputCode, playerId: userId } 
+      payload: { name: userName, roomCode: code, playerId: userId } 
     });
   };
 
@@ -123,15 +143,24 @@ const App: React.FC = () => {
       const impostorCount = gameState.settings.impostorCount;
       const shuffledIds = [...gameState.players].map(p => p.id).sort(() => 0.5 - Math.random());
       const selectedImpostors = shuffledIds.slice(0, impostorCount);
+      
       const updatedPlayers = gameState.players.map(p => ({
         ...p,
         role: selectedImpostors.includes(p.id) ? 'impostor' : 'innocent'
       })) as Player[];
-      const newState: GameState = { ...gameState, status: GameStatus.PLAYING, players: updatedPlayers, roundData: { category, topic } };
+
+      const newState: GameState = { 
+        ...gameState, 
+        status: GameStatus.PLAYING, 
+        players: updatedPlayers, 
+        roundData: { category, topic } 
+      };
+      
       setGameState(newState);
+      sendMessage({ type: 'STATE_UPDATE', payload: newState });
       setView('GAME');
     } catch (e) {
-      setError("Failed to start session.");
+      setError("Topic generation failed. Check internet.");
     } finally {
       setIsLoading(false);
     }
@@ -139,9 +168,16 @@ const App: React.FC = () => {
 
   const resetGame = () => {
     if (!gameState || !isHost) return;
-    const lobbyState: GameState = { ...gameState, status: GameStatus.LOBBY, roundData: undefined, players: gameState.players.map(p => ({...p, role: undefined})) };
+    setGameState(prev => {
+      if (!prev) return null;
+      return { 
+        ...prev, 
+        status: GameStatus.LOBBY, 
+        roundData: undefined, 
+        players: prev.players.map(p => ({...p, role: undefined})) 
+      };
+    });
     sendMessage({ type: 'RESET_GAME', payload: null });
-    setGameState(lobbyState);
     setView('LOBBY');
     setIsRevealed(false);
   };
@@ -149,31 +185,31 @@ const App: React.FC = () => {
   if (view === 'LANDING') {
     return (
       <div className="min-h-screen bg-slate-900 text-slate-100 flex items-center justify-center p-4">
-        <div className="max-w-md w-full space-y-8 animate-in fade-in duration-500">
+        <div className="max-w-md w-full space-y-8 animate-in fade-in zoom-in duration-500">
           <div className="text-center space-y-2">
             <h1 className="text-6xl font-black bg-gradient-to-br from-cyan-400 via-purple-500 to-rose-500 bg-clip-text text-transparent tracking-tighter">IMPOSTOR</h1>
-            <p className="text-slate-400 font-medium">Multiplayer Social Deduction</p>
+            <p className="text-slate-400 font-medium text-sm tracking-widest uppercase font-bold">Multiplayer Social Deduction</p>
           </div>
           <Card>
             <div className="space-y-6">
-              <Input label="Nickname" placeholder="What should we call you?" value={userName} onChange={(e) => setUserName(e.target.value)} />
+              <Input label="Your Name" placeholder="Enter nickname" value={userName} onChange={(e) => setUserName(e.target.value)} />
               <div className="grid grid-cols-2 gap-4">
                  <Button onClick={createGame} className="w-full flex-col py-6 gap-2">
                     <Crown className="w-6 h-6 text-amber-400" />
                     <span>Host Game</span>
                  </Button>
                  <div className="space-y-2">
-                    <Input placeholder="Code" className="text-center font-mono" maxLength={3} value={inputCode} onChange={(e) => setInputCode(e.target.value)} />
+                    <Input placeholder="Code" className="text-center font-mono uppercase" maxLength={4} value={inputCode} onChange={(e) => setInputCode(e.target.value)} />
                     <Button variant="secondary" onClick={joinGame} className="w-full">Join Room</Button>
                  </div>
               </div>
             </div>
           </Card>
-          {error && <div className="text-rose-400 text-center text-sm bg-rose-950/30 p-3 rounded-xl border border-rose-900/50">{error}</div>}
+          {error && <div className="text-rose-400 text-center text-sm bg-rose-950/30 p-3 rounded-xl border border-rose-900/50 flex gap-2 items-center justify-center"><AlertCircle className="w-4 h-4"/> {error}</div>}
           <div className="bg-slate-800/30 p-4 rounded-xl border border-slate-700/50 flex gap-3 items-center">
-            <Globe className="w-5 h-5 text-cyan-500 shrink-0" />
+            <Globe className="w-6 h-6 text-cyan-500 shrink-0" />
             <p className="text-[10px] text-slate-400 uppercase tracking-widest font-black leading-tight">
-              Cross-Device Play Enabled. Both players need internet access.
+              Global Networking Active. Works across any devices with internet.
             </p>
           </div>
         </div>
@@ -192,31 +228,31 @@ const App: React.FC = () => {
                     <Wifi className="w-3 h-3 animate-pulse" />
                     <h2 className="text-xs font-black uppercase tracking-[0.2em]">Room Code</h2>
                   </div>
-                  <div className="text-6xl font-mono font-black text-cyan-400 leading-none drop-shadow-[0_0_15px_rgba(34,211,238,0.3)]">{activeRoomCode}</div>
+                  <div className="text-7xl font-mono font-black text-cyan-400 leading-none drop-shadow-[0_0_20px_rgba(34,211,238,0.4)] tracking-wider uppercase">{activeRoomCode}</div>
               </div>
-              <div className="text-right">
-                  <div className="text-slate-500 text-xs font-black uppercase tracking-[0.2em]">Players Connected</div>
-                  <div className="text-4xl font-black text-slate-300 leading-none">{gameState?.players.length || 0}</div>
+              <div className="text-right hidden sm:block">
+                  <div className="text-slate-500 text-xs font-black uppercase tracking-[0.2em]">Players Joined</div>
+                  <div className="text-5xl font-black text-slate-300 leading-none">{gameState?.players.length || 0}</div>
               </div>
            </div>
            
-           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 overflow-y-auto max-h-[50vh] pr-2 custom-scrollbar">
               {gameState?.players.map(player => (
-                  <div key={player.id} className="bg-slate-800/80 border border-slate-700 p-4 rounded-2xl flex items-center gap-4 shadow-lg animate-in fade-in scale-95">
+                  <div key={player.id} className="bg-slate-800/80 border border-slate-700 p-4 rounded-2xl flex items-center gap-4 shadow-lg animate-in fade-in scale-95 border-l-4 border-l-slate-600">
                       <div className={`w-12 h-12 rounded-xl flex items-center justify-center font-black text-xl shadow-inner ${player.isHost ? 'bg-amber-500 text-amber-950' : 'bg-slate-700 text-slate-300'}`}>
                           {player.name[0].toUpperCase()}
                       </div>
                       <div className="flex-1 min-w-0">
                           <div className="font-bold truncate text-lg">{player.name} {player.id === userId && <span className="text-cyan-500 font-normal text-xs">(You)</span>}</div>
-                          {player.isHost && <div className="text-xs text-amber-500 font-bold flex items-center gap-1 uppercase tracking-wider"><Crown className="w-3 h-3"/> Room Host</div>}
+                          {player.isHost && <div className="text-xs text-amber-500 font-bold flex items-center gap-1 uppercase tracking-wider"><Crown className="w-3 h-3"/> Host</div>}
                       </div>
                       {player.id === userId && <CheckCircle2 className="w-5 h-5 text-cyan-500" />}
                   </div>
               ))}
               {!amIInList && (
                 <div className="col-span-full py-12 flex flex-col items-center gap-4 bg-slate-800/20 border-2 border-dashed border-slate-700 rounded-3xl animate-pulse">
-                  <div className="w-8 h-8 border-4 border-cyan-500/20 border-t-cyan-500 rounded-full animate-spin" />
-                  <p className="text-slate-500 font-bold uppercase tracking-widest text-sm">Synchronizing Room {activeRoomCode}...</p>
+                  <div className="w-10 h-10 border-4 border-cyan-500/20 border-t-cyan-500 rounded-full animate-spin" />
+                  <p className="text-slate-500 font-bold uppercase tracking-widest text-sm">Attempting to Join Room {activeRoomCode}...</p>
                 </div>
               )}
            </div>
@@ -229,21 +265,26 @@ const App: React.FC = () => {
                          <span className="font-bold text-slate-200">Total Impostors</span>
                        </div>
                        <div className="flex items-center gap-6">
-                           <button onClick={() => setGameState(prev => prev ? ({...prev, settings: {impostorCount: Math.max(1, prev.settings.impostorCount - 1)}}) : null)} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl">-</button>
-                           <span className="font-mono text-2xl font-black text-cyan-400">{gameState?.settings.impostorCount || 1}</span>
-                           <button onClick={() => setGameState(prev => prev ? ({...prev, settings: {impostorCount: Math.min(Math.max(1, (gameState?.players.length || 1) - 1), prev.settings.impostorCount + 1)}}) : null)} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl">+</button>
+                           <button onClick={() => setGameState(prev => prev ? ({...prev, settings: {impostorCount: Math.max(1, prev.settings.impostorCount - 1)}}) : null)} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl transition-colors">-</button>
+                           <span className="font-mono text-2xl font-black text-cyan-400 w-8 text-center">{gameState?.settings.impostorCount || 1}</span>
+                           <button onClick={() => setGameState(prev => prev ? ({...prev, settings: {impostorCount: Math.min(Math.max(1, (gameState?.players.length || 1) - 1), prev.settings.impostorCount + 1)}}) : null)} className="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-xl transition-colors">+</button>
                        </div>
                    </div>
-                   <Button onClick={startGame} isLoading={isLoading} disabled={(gameState?.players.length || 0) < 3} size="lg" className="w-full">
-                        <Play className="w-5 h-5 fill-current" /> Start Game Session
+                   <Button onClick={startGame} isLoading={isLoading} disabled={(gameState?.players.length || 0) < 2} size="lg" className="w-full py-6">
+                        <Play className="w-6 h-6 fill-current" /> Start Mission
                    </Button>
+                   {(gameState?.players.length || 0) < 3 && (
+                     <div className="flex items-center justify-center gap-2 text-amber-500/70 text-[10px] font-bold uppercase tracking-widest">
+                       <AlertCircle className="w-3 h-3" /> Minimum 2 players to test, 3+ recommended
+                     </div>
+                   )}
                </Card>
            ) : amIInList && (
-             <div className="flex flex-col items-center gap-4 py-8">
-                <div className="w-10 h-10 border-4 border-cyan-500/20 border-t-cyan-500 rounded-full animate-spin" />
+             <div className="flex flex-col items-center gap-4 py-8 bg-slate-800/20 rounded-3xl border border-slate-800">
+                <div className="w-12 h-12 border-4 border-cyan-500/20 border-t-cyan-500 rounded-full animate-spin" />
                 <div className="text-center">
-                  <p className="text-slate-400 font-black uppercase tracking-widest text-xs">Waiting for Host...</p>
-                  <p className="text-slate-600 text-[10px] font-bold mt-1 uppercase">Connection Stable via Global Relay</p>
+                  <p className="text-slate-300 font-black uppercase tracking-[0.2em] text-sm">Successfully Connected!</p>
+                  <p className="text-slate-500 text-[10px] font-bold mt-2 uppercase tracking-widest">The Host is preparing the round...</p>
                 </div>
              </div>
            )}
@@ -258,53 +299,65 @@ const App: React.FC = () => {
         <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center">
             <div className="w-full max-w-4xl p-4 flex justify-between items-center border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-20">
                 <div className="flex items-center gap-3 bg-slate-800/50 px-4 py-2 rounded-full border border-slate-700">
-                    <div className={`w-3 h-3 rounded-full animate-pulse ${isHost ? 'bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.5)]' : 'bg-cyan-500 shadow-[0_0_8px_rgba(6,182,212,0.5)]'}`} />
-                    <span className="font-black text-sm tracking-tight">{me.name}</span>
+                    <div className={`w-3 h-3 rounded-full animate-pulse ${isHost ? 'bg-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.6)]' : 'bg-cyan-500 shadow-[0_0_10px_rgba(6,182,212,0.6)]'}`} />
+                    <span className="font-black text-xs uppercase tracking-widest">{me.name}</span>
                 </div>
-                {isHost && <Button variant="danger" size="sm" onClick={resetGame} className="px-4"><RefreshCw className="w-4 h-4" /> End Round</Button>}
+                {isHost && <Button variant="danger" size="sm" onClick={resetGame} className="px-4 text-xs font-black uppercase tracking-tighter"><RefreshCw className="w-3 h-3" /> End Round</Button>}
             </div>
-            <div className="flex-1 w-full max-w-lg flex flex-col items-center justify-center p-6 space-y-12 animate-in fade-in zoom-in duration-500">
+
+            <div className="flex-1 w-full max-w-lg flex flex-col items-center justify-center p-6 space-y-12 animate-in fade-in zoom-in duration-700">
                 <div className="text-center space-y-3">
-                    <h2 className="text-slate-500 uppercase tracking-[0.3em] text-xs font-black">Current Category</h2>
-                    <p className="text-4xl font-black text-cyan-400 drop-shadow-lg">{gameState.roundData?.category}</p>
+                    <h2 className="text-slate-500 uppercase tracking-[0.4em] text-[10px] font-black">Mission Category</h2>
+                    <p className="text-5xl font-black text-cyan-400 drop-shadow-lg tracking-tight">{gameState.roundData?.category}</p>
                 </div>
-                <div className="w-full aspect-[4/5] relative">
-                    <button onClick={() => setIsRevealed(!isRevealed)} className="w-full h-full relative group focus:outline-none perspective-1000">
+
+                <div className="w-full aspect-[4/5] relative perspective-1000">
+                    <button 
+                      onClick={() => setIsRevealed(!isRevealed)} 
+                      className="w-full h-full relative group focus:outline-none"
+                    >
                         {isRevealed ? (
-                            <div className={`w-full h-full rounded-[2.5rem] p-10 flex flex-col items-center justify-center text-center gap-8 shadow-2xl border-4 transition-all duration-500 ${isImpostor ? 'bg-gradient-to-br from-rose-900 via-rose-950 to-black border-rose-500 shadow-rose-900/50' : 'bg-gradient-to-br from-cyan-900 via-cyan-950 to-black border-cyan-500 shadow-cyan-900/50'}`}>
+                            <div className={`w-full h-full rounded-[3rem] p-10 flex flex-col items-center justify-center text-center gap-8 shadow-2xl border-4 transition-all duration-500 ${isImpostor ? 'bg-gradient-to-br from-rose-900 via-rose-950 to-black border-rose-500 shadow-rose-900/60' : 'bg-gradient-to-br from-cyan-900 via-cyan-950 to-black border-cyan-500 shadow-cyan-900/60'}`}>
                                 {isImpostor ? (
                                     <>
-                                        <div className="p-6 bg-rose-500/10 rounded-full animate-pulse"><ShieldAlert className="w-24 h-24 text-rose-500" /></div>
-                                        <div className="space-y-2">
-                                          <h3 className="text-5xl font-black text-rose-100 italic tracking-tighter uppercase leading-none">Impostor</h3>
-                                          <p className="text-rose-400 font-bold text-sm uppercase tracking-widest mt-2">You don't know the word!</p>
+                                        <div className="p-8 bg-rose-500/10 rounded-full animate-pulse"><ShieldAlert className="w-28 h-28 text-rose-500" /></div>
+                                        <div className="space-y-4">
+                                          <h3 className="text-6xl font-black text-rose-100 italic tracking-tighter uppercase leading-none drop-shadow-md">Impostor</h3>
+                                          <p className="text-rose-400 font-bold text-xs uppercase tracking-[0.3em] mt-2 opacity-80">You are the intruder</p>
                                         </div>
                                     </>
                                 ) : (
                                     <>
-                                        <div className="p-6 bg-cyan-500/10 rounded-full"><Users className="w-24 h-24 text-cyan-500" /></div>
-                                        <div className="space-y-2">
-                                          <h3 className="text-slate-400 font-bold text-xs uppercase tracking-[0.2em]">The Secret Word</h3>
-                                          <p className="text-5xl font-black text-white tracking-tight leading-none">{gameState.roundData?.topic}</p>
+                                        <div className="p-8 bg-cyan-500/10 rounded-full"><Users className="w-28 h-28 text-cyan-500" /></div>
+                                        <div className="space-y-4">
+                                          <h3 className="text-slate-400 font-bold text-[10px] uppercase tracking-[0.4em]">Secret Identification</h3>
+                                          <p className="text-6xl font-black text-white tracking-tighter leading-none drop-shadow-md uppercase">{gameState.roundData?.topic}</p>
                                         </div>
                                     </>
                                 )}
-                                <div className="absolute bottom-10 flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">
+                                <div className="absolute bottom-12 flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.3em] text-slate-500">
                                     <EyeOff className="w-4 h-4" /> Tap to Hide Secret
                                 </div>
                             </div>
                         ) : (
-                            <div className="w-full h-full bg-slate-800 rounded-[2.5rem] border-4 border-slate-700 flex flex-col items-center justify-center gap-6 transition-all hover:border-slate-500 hover:bg-slate-700/80 shadow-2xl group">
-                                <div className="w-32 h-32 rounded-full bg-slate-900 flex items-center justify-center border-4 border-slate-800 shadow-inner group-hover:scale-110 transition-transform duration-300">
-                                    <span className="text-6xl font-black text-slate-700">?</span>
+                            <div className="w-full h-full bg-slate-800 rounded-[3rem] border-4 border-slate-700 flex flex-col items-center justify-center gap-8 transition-all hover:border-slate-500 hover:bg-slate-700/80 shadow-[0_30px_60px_-15px_rgba(0,0,0,0.6)] group">
+                                <div className="w-40 h-40 rounded-full bg-slate-900 flex items-center justify-center border-4 border-slate-800 shadow-inner group-hover:scale-110 transition-transform duration-500 relative">
+                                    <span className="text-8xl font-black text-slate-700 select-none">?</span>
+                                    <div className="absolute inset-0 rounded-full border-2 border-cyan-500/0 group-hover:border-cyan-500/20 animate-ping" />
                                 </div>
-                                <div className="text-center space-y-1">
-                                  <p className="text-slate-400 font-black uppercase tracking-[0.2em] text-sm">Tap to Reveal</p>
-                                  <p className="text-slate-600 text-[10px] uppercase font-bold">Keep it secret!</p>
+                                <div className="text-center space-y-2">
+                                  <p className="text-slate-400 font-black uppercase tracking-[0.3em] text-sm">Tap to Reveal</p>
+                                  <p className="text-slate-600 text-[10px] uppercase font-bold tracking-widest">Don't let others see!</p>
                                 </div>
                             </div>
                         )}
                     </button>
+                </div>
+                
+                <div className="bg-slate-800/30 px-8 py-5 rounded-3xl border border-slate-700/50 text-center text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 max-w-sm leading-relaxed shadow-lg">
+                    {isImpostor 
+                      ? "Blend in! Ask questions to find out the word without revealing your identity." 
+                      : "The intruder is among you. Listen carefully to find who doesn't know the word."}
                 </div>
             </div>
         </div>
