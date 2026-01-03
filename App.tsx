@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { GameState, GameStatus, Player, NetworkMessage } from './types.ts';
 import { useGameNetwork } from './services/comms.ts';
 import { generateGameTopic } from './services/geminiService.ts';
@@ -13,7 +13,8 @@ import {
   Crown, 
   AlertTriangle,
   ShieldAlert,
-  Settings
+  Settings,
+  Info
 } from 'lucide-react';
 
 const generateRoomCode = () => Math.floor(100 + Math.random() * 900).toString();
@@ -29,19 +30,25 @@ const App: React.FC = () => {
   const [view, setView] = useState<'LANDING' | 'LOBBY' | 'GAME'>('LANDING');
   const [isRevealed, setIsRevealed] = useState(false);
 
-  // Check if current user is host
+  // Refs to avoid dependency loops in message handlers
+  const gameStateRef = useRef<GameState | null>(null);
+  gameStateRef.current = gameState;
+
+  // Determine if I am currently the host
   const me = gameState?.players.find(p => p.id === userId);
   const isHost = me?.isHost || false;
 
   const handleMessage = useCallback((msg: NetworkMessage) => {
+    const currentState = gameStateRef.current;
+
     if (msg.type === 'JOIN_REQUEST') {
       // ONLY the host handles join requests
-      setGameState(current => {
-        if (!current || !isHost) return current;
-        if (msg.payload.roomCode !== current.roomCode) return current;
-        
-        // Don't add if already exists
-        if (current.players.some(p => p.id === msg.payload.playerId)) return current;
+      // We check if we are host based on our current state
+      const amIHost = currentState?.players.find(p => p.id === userId)?.isHost;
+      
+      if (amIHost && currentState.roomCode === msg.payload.roomCode) {
+        // Check if player is already in
+        if (currentState.players.some(p => p.id === msg.payload.playerId)) return;
 
         const newPlayer: Player = {
           id: msg.payload.playerId,
@@ -49,37 +56,65 @@ const App: React.FC = () => {
           isHost: false
         };
         
-        return { ...current, players: [...current.players, newPlayer] };
-      });
+        setGameState({ ...currentState, players: [...currentState.players, newPlayer] });
+      }
     } else if (msg.type === 'STATE_UPDATE') {
-      // Non-hosts adopt the state from the network if it matches their code
-      if (msg.payload.roomCode === (gameState?.roomCode || inputCode)) {
+      // Host is source of truth, never adopt state from others
+      const amIHost = currentState?.players.find(p => p.id === userId)?.isHost;
+      if (amIHost) return;
+
+      // Check if this update is for the room we are interested in
+      const targetCode = currentState?.roomCode || inputCode;
+      if (msg.payload.roomCode === targetCode) {
         setGameState(msg.payload);
+        
+        // Sync the UI view based on the state
         if (msg.payload.status === GameStatus.PLAYING) setView('GAME');
-        if (msg.payload.status === GameStatus.LOBBY) setView('LOBBY');
+        else if (msg.payload.status === GameStatus.LOBBY) setView('LOBBY');
       }
     } else if (msg.type === 'RESET_GAME') {
-      if (gameState && msg.payload === null) {
+      const amIHost = currentState?.players.find(p => p.id === userId)?.isHost;
+      if (!amIHost && currentState?.roomCode === inputCode) {
         setView('LOBBY');
         setIsRevealed(false);
-        setGameState(prev => prev ? ({ 
-          ...prev, 
-          status: GameStatus.LOBBY, 
-          roundData: undefined, 
-          players: prev.players.map(p => ({...p, role: undefined})) 
-        }) : null);
       }
     }
-  }, [userId, isHost, gameState?.roomCode, inputCode]);
+  }, [userId, inputCode]);
 
   const { sendMessage } = useGameNetwork(handleMessage);
 
-  // Sync Effect: Host broadcasts their state whenever it changes locally
+  // --- NETWORK HEARTBEATS ---
+
+  // 1. Host Heartbeat: Broadcast state every 1s
   useEffect(() => {
-    if (isHost && gameState) {
+    if (!isHost || !gameState) return;
+
+    const interval = setInterval(() => {
       sendMessage({ type: 'STATE_UPDATE', payload: gameState });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [isHost, gameState, sendMessage]);
+
+  // 2. Joiner Retry: Request join every 1s until we appear in the player list
+  useEffect(() => {
+    if (view === 'LOBBY' && !isHost && inputCode) {
+      // If we don't have a state yet, OR we are not in the player list of the current state
+      const isInList = gameState?.players.some(p => p.id === userId);
+      
+      if (!isInList) {
+        const interval = setInterval(() => {
+          sendMessage({ 
+            type: 'JOIN_REQUEST', 
+            payload: { name: userName, roomCode: inputCode, playerId: userId } 
+          });
+        }, 1000);
+        return () => clearInterval(interval);
+      }
     }
-  }, [gameState, isHost, sendMessage]);
+  }, [view, isHost, gameState, inputCode, userName, userId, sendMessage]);
+
+  // --- ACTIONS ---
 
   const createGame = () => {
     if (!userName.trim()) return setError("Please enter your name");
@@ -98,6 +133,7 @@ const App: React.FC = () => {
   const joinGame = () => {
     if (!userName.trim() || !inputCode.trim()) return setError("Name and Room Code are required");
     setError(null);
+    // Trigger initial request
     sendMessage({ 
       type: 'JOIN_REQUEST', 
       payload: { name: userName, roomCode: inputCode, playerId: userId } 
@@ -120,12 +156,15 @@ const App: React.FC = () => {
         role: selectedImpostors.includes(p.id) ? 'impostor' : 'innocent'
       })) as Player[];
 
-      setGameState({
+      const newState: GameState = {
         ...gameState,
         status: GameStatus.PLAYING,
         players: updatedPlayers,
         roundData: { category, topic }
-      });
+      };
+
+      setGameState(newState);
+      sendMessage({ type: 'STATE_UPDATE', payload: newState });
       setView('GAME');
     } catch (e) {
       setError("Failed to start game.");
@@ -136,16 +175,20 @@ const App: React.FC = () => {
 
   const resetGame = () => {
     if (!gameState || !isHost) return;
-    sendMessage({ type: 'RESET_GAME', payload: null });
-    setGameState(prev => prev ? ({ 
-      ...prev, 
+    const lobbyState: GameState = { 
+      ...gameState, 
       status: GameStatus.LOBBY, 
       roundData: undefined, 
-      players: prev.players.map(p => ({...p, role: undefined})) 
-    }) : null);
+      players: gameState.players.map(p => ({...p, role: undefined})) 
+    };
+    sendMessage({ type: 'STATE_UPDATE', payload: lobbyState });
+    sendMessage({ type: 'RESET_GAME', payload: null });
+    setGameState(lobbyState);
     setView('LOBBY');
     setIsRevealed(false);
   };
+
+  // --- RENDERERS ---
 
   if (view === 'LANDING') {
     return (
@@ -171,9 +214,12 @@ const App: React.FC = () => {
             </div>
           </Card>
           {error && <div className="text-rose-400 text-center text-sm bg-rose-950/30 p-3 rounded-xl border border-rose-900/50">{error}</div>}
-          <div className="flex justify-center gap-2 text-[10px] text-slate-500 uppercase tracking-widest font-bold">
-            <AlertTriangle className="w-3 h-3 text-amber-500" /> 
-            <span>Open multiple tabs to simulate multiple players</span>
+          
+          <div className="bg-slate-800/30 p-4 rounded-xl border border-slate-700/50 flex gap-3 items-start">
+            <Info className="w-5 h-5 text-cyan-500 shrink-0 mt-0.5" />
+            <p className="text-xs text-slate-400 leading-relaxed">
+              <strong>Local Network Mode:</strong> To play with others, open this page in multiple tabs or windows in the <strong>same browser</strong>. Cross-device play is not supported in this demo.
+            </p>
           </div>
         </div>
       </div>
@@ -181,17 +227,21 @@ const App: React.FC = () => {
   }
 
   if (view === 'LOBBY') {
+    const displayCode = gameState?.roomCode || inputCode;
+    const playerCount = gameState?.players.length || 0;
+    const amIInList = gameState?.players.some(p => p.id === userId);
+
     return (
       <div className="min-h-screen bg-slate-900 text-slate-100 p-6 flex flex-col items-center">
         <div className="max-w-2xl w-full space-y-8 animate-in slide-in-from-bottom-4 duration-500">
            <div className="flex items-end justify-between border-b border-slate-800 pb-6">
               <div>
                   <h2 className="text-slate-500 text-xs font-black uppercase tracking-[0.2em]">Room Code</h2>
-                  <div className="text-6xl font-mono font-black text-cyan-400 leading-none">{gameState?.roomCode || inputCode}</div>
+                  <div className="text-6xl font-mono font-black text-cyan-400 leading-none">{displayCode}</div>
               </div>
               <div className="text-right">
                   <div className="text-slate-500 text-xs font-black uppercase tracking-[0.2em]">Players</div>
-                  <div className="text-4xl font-black text-slate-300 leading-none">{gameState?.players.length || 0}</div>
+                  <div className="text-4xl font-black text-slate-300 leading-none">{playerCount}</div>
               </div>
            </div>
            
@@ -207,9 +257,10 @@ const App: React.FC = () => {
                       </div>
                   </div>
               ))}
-              {(!gameState || gameState.players.length === 0) && (
-                <div className="col-span-full py-12 text-center text-slate-500 font-bold uppercase tracking-widest text-sm animate-pulse">
-                  Requesting Entry...
+              {!amIInList && (
+                <div className="col-span-full py-12 flex flex-col items-center gap-4 bg-slate-800/20 border-2 border-dashed border-slate-700 rounded-3xl animate-pulse">
+                  <div className="w-8 h-8 border-4 border-cyan-500/20 border-t-cyan-500 rounded-full animate-spin" />
+                  <p className="text-slate-500 font-bold uppercase tracking-widest text-sm">Searching for Lobby {displayCode}...</p>
                 </div>
               )}
            </div>
@@ -232,10 +283,10 @@ const App: React.FC = () => {
                    </Button>
                    {(gameState?.players.length || 0) < 3 && <p className="text-center text-xs text-slate-500 font-medium italic">Waiting for at least 3 players to join...</p>}
                </Card>
-           ) : (
+           ) : amIInList && (
              <div className="flex flex-col items-center gap-4 py-8">
                 <div className="w-8 h-8 border-4 border-cyan-500/20 border-t-cyan-500 rounded-full animate-spin" />
-                <p className="text-slate-500 font-bold uppercase tracking-widest text-xs">Connected to Lobby {inputCode}. Waiting for host...</p>
+                <p className="text-slate-400 font-bold uppercase tracking-widest text-xs">Connected! Waiting for host to start...</p>
              </div>
            )}
         </div>
