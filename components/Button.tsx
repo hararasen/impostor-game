@@ -16,8 +16,9 @@ export const Button: React.FC<ButtonProps> = ({
   disabled,
   ...props 
 }) => {
-  // Added 'touch-manipulation' to prevent 300ms tap delay on some mobile browsers
-  const baseStyles = "rounded-xl font-bold transition-all duration-200 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 touch-manipulation";
+  // Removed active:scale-95 to avoid touch cancellation issues on some mobile devices
+  // Added relative z-10 to ensure it's always clickable above other elements
+  const baseStyles = "relative z-10 rounded-xl font-bold transition-all duration-200 active:opacity-80 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer select-none";
   
   const sizeStyles = {
     sm: "px-3 py-1.5 text-sm",

@@ -200,12 +200,21 @@ const App: React.FC = () => {
     });
   };
 
+  // Helper container to ensure mobile centering works without clipping
+  const Container = ({ children, className = '' }: { children: React.ReactNode, className?: string }) => (
+    <div className={`min-h-dvh w-full bg-slate-900 text-slate-100 flex flex-col p-6 sm:p-4 overflow-y-auto overflow-x-hidden ${className}`}>
+      <div className="w-full max-w-md mx-auto my-auto flex flex-col gap-6">
+        {children}
+      </div>
+    </div>
+  );
+
   // UI VIEWS
   
   if (state.status === GameStatus.LOBBY) {
     return (
-      <div className="min-h-screen bg-slate-900 text-slate-100 flex items-center justify-center p-6 sm:p-4">
-        <div className="max-w-md w-full space-y-10 animate-in fade-in zoom-in-95 duration-500">
+      <Container>
+        <div className="space-y-10 animate-in fade-in zoom-in-95 duration-500">
           <div className="text-center space-y-4">
             <h1 className="text-7xl font-black bg-gradient-to-br from-cyan-400 via-purple-500 to-rose-500 bg-clip-text text-transparent tracking-tighter drop-shadow-2xl">IMPOSTOR</h1>
             <p className="text-slate-500 font-bold text-[10px] tracking-[0.5em] uppercase">The Ultimate AI Social Deduction</p>
@@ -245,7 +254,7 @@ const App: React.FC = () => {
             )}
           </div>
         </div>
-      </div>
+      </Container>
     );
   }
 
@@ -253,8 +262,8 @@ const App: React.FC = () => {
     const isHost = state.mode === 'LOCAL' || state.players[0]?.isHost;
 
     return (
-      <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col p-6 sm:p-4">
-        <div className="max-w-md w-full mx-auto flex-1 flex flex-col space-y-8 py-8 animate-in fade-in duration-500">
+      <Container>
+        <div className="flex-1 flex flex-col space-y-8 animate-in fade-in duration-500">
           <div className="flex justify-between items-center">
              <Button variant="ghost" size="sm" onClick={resetToSetup}><RefreshCw className="w-4 h-4" /></Button>
              <h2 className="text-sm font-black tracking-[0.3em] uppercase text-slate-500">
@@ -296,7 +305,7 @@ const App: React.FC = () => {
                     type="range" min="3" max="12" 
                     value={playerCount} 
                     onChange={(e) => setPlayerCount(parseInt(e.target.value))}
-                    className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500"
+                    className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500 touch-pan-x"
                   />
                 </div>
               </div>
@@ -341,7 +350,7 @@ const App: React.FC = () => {
                 type="range" min="1" max={Math.max(1, Math.floor(playerCount / 2))} 
                 value={state.impostorCount} 
                 onChange={(e) => setState({...state, impostorCount: parseInt(e.target.value)})}
-                className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-rose-500"
+                className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-rose-500 touch-pan-x"
                 disabled={!isHost}
               />
             </div>
@@ -357,16 +366,16 @@ const App: React.FC = () => {
             </div>
           )}
         </div>
-      </div>
+      </Container>
     );
   }
 
   if (state.status === GameStatus.NAMES) {
     return (
-      <div className="min-h-screen bg-slate-900 text-slate-100 flex items-center justify-center p-4">
-        <div className="max-w-md w-full space-y-6 animate-in slide-in-from-bottom-4 duration-500">
+      <Container>
+        <div className="space-y-6 animate-in slide-in-from-bottom-4 duration-500">
           <h2 className="text-xl font-black uppercase tracking-widest text-center">Who's In?</h2>
-          <Card className="max-h-[60vh] overflow-y-auto space-y-3 custom-scrollbar">
+          <Card className="max-h-[50vh] overflow-y-auto space-y-3 custom-scrollbar">
             {names.map((name, i) => (
               <Input 
                 key={i}
@@ -384,15 +393,15 @@ const App: React.FC = () => {
             <Play className="w-6 h-6 fill-current" /> Start Mission
           </Button>
         </div>
-      </div>
+      </Container>
     );
   }
 
   if (state.status === GameStatus.PASSING) {
     const currentPlayer = state.players[state.currentPlayerIndex];
     return (
-      <div className="min-h-screen bg-slate-900 text-slate-100 flex items-center justify-center p-6 sm:p-4">
-        <div className="max-w-sm w-full space-y-12 text-center animate-in zoom-in-95 duration-500">
+      <Container>
+        <div className="space-y-12 text-center animate-in zoom-in-95 duration-500">
           <div className="space-y-4">
             <div className="inline-flex p-6 rounded-full bg-slate-800 border-2 border-slate-700 shadow-2xl">
                <Users className="w-16 h-16 text-cyan-500" />
@@ -402,14 +411,14 @@ const App: React.FC = () => {
 
           <div className="space-y-2">
             <p className="text-slate-500 font-bold uppercase tracking-widest text-xs">Pass to</p>
-            <h3 className="text-6xl font-black text-white tracking-tighter drop-shadow-lg">{currentPlayer.name}</h3>
+            <h3 className="text-6xl font-black text-white tracking-tighter drop-shadow-lg break-words">{currentPlayer.name}</h3>
           </div>
 
           <Button variant="primary" size="lg" onClick={() => setState(prev => ({ ...prev, status: GameStatus.REVEALING }))} className="w-full py-8 rounded-[2.5rem] text-2xl font-black border-b-8 border-cyan-700 active:border-b-0 active:translate-y-2 transition-all">
              I am {currentPlayer.name}
           </Button>
         </div>
-      </div>
+      </Container>
     );
   }
 
@@ -418,7 +427,7 @@ const App: React.FC = () => {
     const isImpostor = currentPlayer.role === 'impostor';
     
     return (
-      <div className="min-h-screen bg-slate-900 text-slate-100 flex items-center justify-center p-4 select-none touch-none overflow-hidden">
+      <div className="min-h-dvh bg-slate-900 text-slate-100 flex flex-col justify-center items-center p-4 select-none touch-none overflow-hidden">
         <div className="max-w-md w-full space-y-12 text-center animate-in fade-in duration-300">
            <div className="space-y-2">
               <p className="text-slate-500 font-black uppercase tracking-[0.2em] text-xs">Keep it Secret</p>
@@ -430,9 +439,10 @@ const App: React.FC = () => {
                 onContextMenu={(e) => e.preventDefault()}
                 onMouseDown={() => setIsHolding(true)}
                 onMouseUp={() => setIsHolding(false)}
+                onMouseLeave={() => setIsHolding(false)}
                 onTouchStart={(e) => { e.preventDefault(); setIsHolding(true); }}
                 onTouchEnd={(e) => { e.preventDefault(); setIsHolding(false); }}
-                className={`w-full aspect-square rounded-[4rem] border-4 transition-all duration-300 flex flex-col items-center justify-center gap-6 shadow-2xl ${isHolding ? 'bg-slate-800 border-slate-400 scale-[0.98]' : 'bg-slate-900 border-slate-700 border-dashed hover:border-slate-500'}`}
+                className={`w-full aspect-square rounded-[4rem] border-4 transition-all duration-300 flex flex-col items-center justify-center gap-6 shadow-2xl cursor-pointer ${isHolding ? 'bg-slate-800 border-slate-400 scale-[0.98]' : 'bg-slate-900 border-slate-700 border-dashed hover:border-slate-500'}`}
               >
                 {isHolding ? (
                   <>
@@ -473,20 +483,20 @@ const App: React.FC = () => {
 
   if (state.status === GameStatus.PLAYING) {
     return (
-      <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center p-6 sm:p-4 overflow-x-hidden">
-        <div className="w-full max-w-md flex justify-between items-center mb-8 mt-4">
+      <Container>
+        <div className="w-full flex justify-between items-center mb-8">
            <h1 className="text-xl font-black italic tracking-tighter text-cyan-400 uppercase">Mission Data</h1>
            <Button variant="ghost" size="sm" onClick={resetToSetup} className="text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-white">
              <RefreshCw className="w-3 h-3" /> Abort
            </Button>
         </div>
 
-        <div className="max-w-md w-full space-y-10 animate-in slide-in-from-bottom-8 duration-700">
+        <div className="space-y-10 animate-in slide-in-from-bottom-8 duration-700">
            <Card className="text-center space-y-4 border-2 border-slate-700 bg-slate-800/80 shadow-2xl relative overflow-hidden">
               <div className="absolute top-0 left-0 w-full h-1 bg-cyan-500 shadow-[0_0_10px_rgba(6,182,212,0.5)]"></div>
               <div className="space-y-1 pt-2">
                 <p className="text-[10px] font-black text-slate-500 uppercase tracking-[0.6em]">Category</p>
-                <h2 className="text-6xl font-black text-white tracking-tighter uppercase drop-shadow-md">{state.roundData?.category}</h2>
+                <h2 className="text-6xl font-black text-white tracking-tighter uppercase drop-shadow-md break-words">{state.roundData?.category}</h2>
               </div>
            </Card>
 
@@ -521,7 +531,7 @@ const App: React.FC = () => {
               </div>
            </div>
         </div>
-      </div>
+      </Container>
     );
   }
 
